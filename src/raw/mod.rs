@@ -4,8 +4,8 @@ use std::{
     path::Path,
 };
 pub struct RAW {
-    image: File,
-    _description: String,
+    pub file: File,
+    pub description: String,
 }
 
 impl RAW {
@@ -18,19 +18,19 @@ impl RAW {
         };
 
         return Ok(RAW {
-            image: fd,
-            _description: "RAW image format".to_string(),
+            file: fd,
+            description: "Reader for a RAW source file format.".to_string(),
         });
     }
 
     pub fn read(&mut self, size: usize) -> Vec<u8> {
         // Read data into the buffer in chunks
         let mut buffer = vec![0; size]; // Create a temporary buffer
-        self.image.read_exact(&mut buffer).unwrap();
+        self.file.read_exact(&mut buffer).unwrap();
         return buffer;
     }
 
     pub fn seek(&mut self, offset: usize) {
-        self.image.seek(SeekFrom::Start(offset as u64)).unwrap();
+        self.file.seek(SeekFrom::Start(offset as u64)).unwrap();
     }
 }
