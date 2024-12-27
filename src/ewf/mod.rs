@@ -1,4 +1,3 @@
-use core::panic;
 use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
 use std::fs::File;
@@ -200,7 +199,7 @@ impl EWF {
         return Ok(ewf);
     }
 
-    pub fn get_sector_size(&self) -> u16 {
+    pub fn _get_sector_size(&self) -> u16 {
         return self.volume.bytes_per_sector as u16;
     }
 
@@ -316,10 +315,11 @@ impl EWF {
     fn read_chunk(&self, segment: usize, chunk_number: usize) -> Vec<u8> {
         //println!("Reading chunk number {:?}, segment {:?}", chunk_number, segment);
         if chunk_number >= self.chunks.get(&segment).unwrap().len() {
-            panic!(
+            eprintln!(
                 "Could not read chunk number {:?} in segment number {:?}",
                 chunk_number, segment
             );
+            std::process::exit(1);
         }
         let mut data: Vec<u8>;
         let chunk = &self.chunks[&segment][chunk_number];
@@ -393,7 +393,8 @@ impl EWF {
                             self.cached_chunk.number = 0;
                             self.cached_chunk.segment += 1;
                         } else {
-                            panic!("Could not read next chunk");
+                            eprintln!("Could not read the next chunk");
+                            std::process::exit(1);
                         }
                     }
                     self.cached_chunk.data =
@@ -409,12 +410,14 @@ impl EWF {
 
     pub fn seek(&mut self, offset: usize) {
         if offset > self.volume.max_offset() {
-            panic!("Could not compute the offset");
+            eprintln!("Could not seek to the requested offset: 0x{:x}, the offset is higher than the volume's maximum offset ", offset);
+            std::process::exit(1);
         }
 
         let mut chunk_number = offset / self.volume.chunk_size();
         if chunk_number >= self.volume.chunk_count as usize {
-            panic!("Error the chunk number requested is higher than the total number of chunk")
+            eprintln!("Error the chunk number requested ({:?}) is higher than the total number of chunk ({:?}).",chunk_number,  self.volume.chunk_count);
+            std::process::exit(1);
         }
 
         let mut segment = 1;
