@@ -5,7 +5,6 @@ use std::{
 };
 pub struct RAW {
     pub file: File,
-    pub description: String,
 }
 
 impl RAW {
@@ -17,10 +16,7 @@ impl RAW {
             Err(m) => return Err(m.to_string()),
         };
 
-        return Ok(RAW {
-            file: fd,
-            description: "Reader for a RAW source file format.".to_string(),
-        });
+        return Ok(RAW { file: fd });
     }
 
     pub fn read(&mut self, size: usize) -> Vec<u8> {

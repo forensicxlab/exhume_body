@@ -14,12 +14,15 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &usize, ver
             }
             let mut file = match RAW::new(file_path) {
                 Ok(file) => file,
-                Err(_err) => return (),
+                Err(err) => {
+                    eprintln!("Error: {}", err);
+                    std::process::exit(1);
+                }
             };
             if *verbose {
                 println!("------------------------------------------------------------");
                 println!("Selected reader: RAW");
-                println!("Description: {:?}", file.description);
+                println!("Description: Standard reader.");
                 println!("------------------------------------------------------------");
             }
 
@@ -30,8 +33,28 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &usize, ver
             println!("{}", result);
         }
         "ewf" => {
-            println!("Processing the file '{}' in 'ewf' format...", file_path);
-            let _file = EWF::new(file_path);
+            if *verbose {
+                println!("Processing the file '{}' in 'ewf' format...", file_path);
+            }
+            let mut file = match EWF::new(file_path) {
+                Ok(file) => file,
+                Err(err) => {
+                    eprintln!("Error: {}", err);
+                    std::process::exit(1);
+                }
+            };
+            if *verbose {
+                println!("------------------------------------------------------------");
+                println!("Selected reader: EWF");
+                println!("Description: Expert Witness Format.");
+                println!("------------------------------------------------------------");
+            }
+
+            // Seek to the offset
+            file.seek(*offset);
+            let bytes = file.read(*size);
+            let result = String::from_utf8_lossy(&bytes);
+            println!("{}", result);
         }
         _ => {
             eprintln!(
@@ -84,7 +107,7 @@ fn main() {
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
-                .action(ArgAction::SetFalse),
+                .action(ArgAction::SetTrue),
         )
         .get_matches();
 
