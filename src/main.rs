@@ -1,60 +1,35 @@
-mod ewf;
-mod raw;
-
 use clap::{Arg, ArgAction, Command};
-use ewf::EWF;
-use raw::RAW;
+use exhume_body::Body;
 use std;
 
 fn process_file(file_path: &str, format: &str, size: &usize, offset: &usize, verbose: &bool) {
+    let mut reader: Body;
     match format {
         "raw" => {
             if *verbose {
                 println!("Processing the file '{}' in 'raw' format...", file_path);
             }
-            let mut file = match RAW::new(file_path) {
-                Ok(file) => file,
-                Err(err) => {
-                    eprintln!("Error: {}", err);
-                    std::process::exit(1);
-                }
-            };
+            reader = Body::new(file_path.to_string(), format);
             if *verbose {
+                reader.print_info();
                 println!("------------------------------------------------------------");
-                println!("Selected reader: RAW");
-                println!("Description: Standard reader.");
+                println!("Selected format: RAW");
+                println!("Description: Raw Data");
                 println!("------------------------------------------------------------");
             }
-
-            // Seek to the offset
-            file.seek(*offset);
-            let bytes = file.read(*size);
-            let result = String::from_utf8_lossy(&bytes);
-            println!("{}", result);
         }
         "ewf" => {
+            reader = Body::new(file_path.to_string(), format);
             if *verbose {
                 println!("Processing the file '{}' in 'ewf' format...", file_path);
             }
-            let mut file = match EWF::new(file_path) {
-                Ok(file) => file,
-                Err(err) => {
-                    eprintln!("Error: {}", err);
-                    std::process::exit(1);
-                }
-            };
+
             if *verbose {
                 println!("------------------------------------------------------------");
-                println!("Selected reader: EWF");
+                println!("Selected format: EWF");
                 println!("Description: Expert Witness Format.");
                 println!("------------------------------------------------------------");
             }
-
-            // Seek to the offset
-            file.seek(*offset);
-            let bytes = file.read(*size);
-            let result = String::from_utf8_lossy(&bytes);
-            println!("{}", result);
         }
         _ => {
             eprintln!(
@@ -64,13 +39,18 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &usize, ver
             std::process::exit(1);
         }
     }
+    // Seek to the offset
+    reader.seek(*offset);
+    let bytes = reader.read(*size);
+    let result = String::from_utf8_lossy(&bytes);
+    println!("{}", result);
 }
 
 fn main() {
-    let matches = Command::new("my_program")
+    let matches = Command::new("exhume_readers")
         .version("1.0")
         .author("ForensicXlab")
-        .about("A program that processes files based on the given format.")
+        .about("Exhume a body of data from many file formats.")
         .arg(
             Arg::new("input")
                 .short('i')

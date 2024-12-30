@@ -199,7 +199,7 @@ impl EWF {
         return Ok(ewf);
     }
 
-    pub fn _get_sector_size(&self) -> u16 {
+    pub fn get_sector_size(&self) -> u16 {
         return self.volume.bytes_per_sector as u16;
     }
 
