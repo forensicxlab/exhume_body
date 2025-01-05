@@ -37,7 +37,7 @@ struct EwfVolumeSection {
 
 struct Chunk {
     compressed: bool,    // Am I compressed ?
-    data_offset: u32,    // Where are my data starting ?
+    data_offset: u64,    // Where are my data starting ?
     chunk_number: usize, // What is my chunk number (absolute) ?
 }
 struct ChunkCache {
@@ -109,19 +109,29 @@ impl EwfHeader {
         let ewf_e01_signature = [0x45, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00];
 
         let mut signature: [u8; 8] = [0u8; 8];
-        let mut segment_number: [u8; 2] = [0u8; 2];
-
-        file.read(&mut signature).unwrap();
-        file.seek(SeekFrom::Start(9)).unwrap();
-        file.read(&mut segment_number).unwrap();
+        file.read_exact(&mut signature).unwrap();
 
         if (ewf_l01_signature != signature) && (signature != ewf_e01_signature) {
-            return Err("Invalid Signature".to_string());
+            return Err("Invalid Signature.".to_string());
         }
-        return Ok(EwfHeader {
+
+        let mut one_byte: [u8; 1] = [0u8; 1];
+        file.read_exact(&mut one_byte).unwrap();
+
+        let mut segment_number: [u8; 2] = [0u8; 2];
+        file.read_exact(&mut segment_number).unwrap();
+
+        let mut zero_field: [u8; 2] = [0u8; 2];
+        file.read_exact(&mut zero_field).unwrap();
+
+        if one_byte[0] != 1 || zero_field != [0u8; 2] {
+            return Err("Invalid Header Fields.".to_string());
+        }
+
+        Ok(EwfHeader {
             _signature: signature,
             segment_number: u16::from_le_bytes(segment_number),
-        });
+        })
     }
 }
 
@@ -211,40 +221,38 @@ impl EWF {
 
         file.read(&mut buffer).unwrap();
         let entry_count = u32::from_le_bytes(buffer);
-        file.seek(SeekFrom::Start(offset + 8)).unwrap();
 
-        file.read(&mut buffer).unwrap();
-        let table_base_offset = u32::from_le_bytes(buffer);
+        let mut buffer_u64: [u8; 8] = [0; 8];
+        file.seek(SeekFrom::Start(offset + 8)).unwrap();
+        file.read_exact(&mut buffer_u64).unwrap();
+        let table_base_offset = u64::from_le_bytes(buffer_u64);
 
         file.read(&mut buffer).unwrap();
         let _checksum = u32::from_le_bytes(buffer); // Not used yet.
 
         file.seek(SeekFrom::Start(offset + 24)).unwrap(); // We place ourself at the beginning of the first table entry.
 
-        let msb: u32 = 0x80000000; // binary representation of the MSB
-        let mut tentry: u32;
-        let mut ptr: u32;
-        for _ in 0..entry_count {
-            file.read(&mut buffer).unwrap();
-            tentry = u32::from_le_bytes(buffer);
-            ptr = tentry & 0x7fffffff; // The first bit is the the compression status.
-            ptr = ptr + table_base_offset; // Now we have our ptr pointing to the offset of the EWF Segment file.
-            if tentry & msb == 0 {
-                // Chunk is uncompressed
-                chunks.push(Chunk {
-                    compressed: false,
-                    data_offset: ptr,
-                    chunk_number: self.chunk_count.clone(),
-                });
-            } else {
-                // Chunk is compressed
-                chunks.push(Chunk {
-                    compressed: true,
-                    data_offset: ptr,
-                    chunk_number: self.chunk_count.clone(),
-                });
-            }
-            self.chunk_count = self.chunk_count + 1;
+        let mut entry_buffer = vec![0u8; entry_count as usize * 4];
+        file.read_exact(&mut entry_buffer).unwrap();
+
+        for i in 0..entry_count as usize {
+            let start = i * 4;
+            let tentry = u32::from_le_bytes(entry_buffer[start..start + 4].try_into().unwrap());
+            let msb: u32 = 0x80000000;
+            let mut ptr = (tentry & 0x7FFFFFFF) as u64;
+            ptr += table_base_offset;
+
+            chunks.push(Chunk {
+                compressed: (tentry & msb) != 0,
+                data_offset: ptr,
+                chunk_number: self.chunk_count,
+            });
+
+            self.chunk_count = self
+                .chunk_count
+                .checked_add(1)
+                .ok_or("Chunk count overflow")
+                .unwrap();
         }
         return chunks;
     }
@@ -313,7 +321,10 @@ impl EWF {
     }
 
     fn read_chunk(&self, segment: usize, chunk_number: usize) -> Vec<u8> {
-        //println!("Reading chunk number {:?}, segment {:?}", chunk_number, segment);
+        // println!(
+        //     "Reading chunk number {:?}, segment {:?}",
+        //     chunk_number, segment
+        // );
         if chunk_number >= self.chunks.get(&segment).unwrap().len() {
             eprintln!(
                 "Could not read chunk number {:?} in segment number {:?}",
@@ -360,7 +371,7 @@ impl EWF {
     }
 
     pub fn read(&mut self, mut size: usize) -> Vec<u8> {
-        //println!("Reading {:?} byte", size);
+        // println!("Reading {:?} byte", size);
         let mut data: Vec<u8> = Vec::new();
         if self.cached_chunk.data.is_empty() {
             // There is no chunk in cache, the first chunk of the first segment become our cached chunk.
@@ -440,19 +451,34 @@ fn find_files(path: &Path) -> Result<Vec<PathBuf>, String> {
     let path = path
         .canonicalize()
         .map_err(|_| "Invalid path".to_string())?;
-    let ext = path
-        .extension()
-        .ok_or_else(|| "Invalid extension".to_string())?;
-    let ext_str = ext
+    let filename = path
+        .file_name()
+        .ok_or_else(|| "Invalid file name".to_string())?;
+    let filename_str = filename
         .to_str()
-        .ok_or_else(|| "Invalid extension".to_string())?;
+        .ok_or_else(|| "Invalid file name".to_string())?;
 
-    if !['E', 'L', 'S'].contains(&ext_str.chars().nth(0).unwrap().to_ascii_uppercase()) {
-        return Err(format!("Invalid EWF file: {}", path.display()));
+    if filename_str.len() < 2 {
+        return Err("File name too short".to_string());
     }
-    let pattern = format!("{}/*.[ELS]??", path.parent().unwrap().display());
-    let files = glob::glob(&pattern).map_err(|_| "Glob error".to_string())?;
-    let mut paths: Vec<PathBuf> = files.filter_map(|f| f.ok()).collect();
+
+    let base_filename = &filename_str[..filename_str.len() - 2];
+    let parent = path
+        .parent()
+        .ok_or_else(|| "No parent directory".to_string())?;
+
+    // Construct the pattern using PathBuf and OsString for cross-platform compatibility
+    let mut pattern_path = PathBuf::from(parent);
+    pattern_path.push(format!("{}??", base_filename));
+
+    // Convert PathBuf to string for glob
+    let pattern = pattern_path
+        .to_str()
+        .ok_or_else(|| "Invalid pattern".to_string())?
+        .to_string();
+
+    let files = glob::glob(&pattern).map_err(|e| format!("Glob error: {}", e))?;
+    let mut paths: Vec<PathBuf> = files.filter_map(Result::ok).collect();
     paths.sort();
 
     Ok(paths)

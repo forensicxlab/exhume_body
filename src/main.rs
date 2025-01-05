@@ -47,17 +47,17 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &usize, ver
 }
 
 fn main() {
-    let matches = Command::new("exhume_readers")
+    let matches = Command::new("exhume_body")
         .version("1.0")
         .author("ForensicXlab")
         .about("Exhume a body of data from many file formats.")
         .arg(
-            Arg::new("input")
-                .short('i')
-                .long("input")
+            Arg::new("body")
+                .short('b')
+                .long("body")
                 .value_parser(clap::value_parser!(String))
                 .required(true)
-                .help("The path to the input file."),
+                .help("The path to the body to exhume."),
         )
         .arg(
             Arg::new("format")
@@ -91,7 +91,7 @@ fn main() {
         )
         .get_matches();
 
-    let file_path = matches.get_one::<String>("input").unwrap();
+    let file_path = matches.get_one::<String>("body").unwrap();
     let format = matches.get_one::<String>("format").unwrap();
     let size = matches.get_one::<usize>("size").unwrap();
     let offset = match matches.get_one::<usize>("offset") {
