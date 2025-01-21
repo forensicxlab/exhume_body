@@ -31,7 +31,7 @@ impl RAW {
         };
     }
 
-    pub fn seek(&mut self, offset: usize) {
+    pub fn seek(&mut self, offset: u64) {
         self.file.seek(SeekFrom::Start(offset as u64)).unwrap();
     }
 }

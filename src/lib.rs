@@ -4,6 +4,8 @@ pub mod raw;
 use ewf::EWF;
 use raw::RAW;
 
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
+
 pub enum BodyFormat {
     RAW {
         image: raw::RAW,
@@ -70,16 +72,26 @@ impl Body {
     }
 
     pub fn read(&mut self, size: usize) -> Vec<u8> {
+        let mut buffer = vec![0; size];
         match self.format {
-            BodyFormat::EWF { ref mut image, .. } => image.read(size),
+            BodyFormat::EWF { ref mut image, .. } => {
+                let bytes_read = image.read(&mut buffer).unwrap();
+                println!(
+                    "Read {} bytes using the EWF format method directly.",
+                    bytes_read
+                );
+                buffer
+            }
             BodyFormat::RAW { ref mut image, .. } => image.read(size),
             // All other compatible formats will be handled here.
         }
     }
 
-    pub fn seek(&mut self, offset: usize) {
+    pub fn seek(&mut self, offset: u64) {
         match self.format {
-            BodyFormat::EWF { ref mut image, .. } => image.seek(offset),
+            BodyFormat::EWF { ref mut image, .. } => {
+                let u = image.seek(SeekFrom::Start(offset)).unwrap();
+            }
             BodyFormat::RAW { ref mut image, .. } => image.seek(offset),
             // All other compatible formats will be handled here.
         }

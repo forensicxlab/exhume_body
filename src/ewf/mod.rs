@@ -1,9 +1,7 @@
 use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
-use std::io::Seek;
-use std::io::SeekFrom;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[derive(Default)]
@@ -58,6 +56,7 @@ pub struct EWF {
     end_of_sectors: HashMap<usize, u64>,
     cached_chunk: ChunkCache,
     chunk_count: usize,
+    position: u64,
 }
 
 impl Default for ChunkCache {
@@ -370,80 +369,149 @@ impl EWF {
         return data;
     }
 
-    pub fn read(&mut self, mut size: usize) -> Vec<u8> {
-        // println!("Reading {:?} byte", size);
-        let mut data: Vec<u8> = Vec::new();
+    fn ewf_read(&mut self, buf: &mut [u8]) -> usize {
+        let mut total_bytes_read = 0;
+        let mut remaining = buf.len();
+
         if self.cached_chunk.data.is_empty() {
-            // There is no chunk in cache, the first chunk of the first segment become our cached chunk.
             self.cached_chunk.data =
                 self.read_chunk(self.cached_chunk.segment, self.cached_chunk.number);
         }
 
-        while size > 0 {
-            if self.volume.chunk_size() - self.cached_chunk.ptr >= size {
-                data.extend(
-                    &self.cached_chunk.data[self.cached_chunk.ptr..(self.cached_chunk.ptr + size)],
+        // While there is still space in our buffer.
+        while remaining > 0 {
+            let current_chunk = self.volume.chunk_size();
+            let available_in_chunk = current_chunk - self.cached_chunk.ptr;
+
+            // When the current chunk holds enough bytes to satisfy the remainder of the buffer.
+            if available_in_chunk >= remaining {
+                buf[total_bytes_read..total_bytes_read + remaining].copy_from_slice(
+                    &self.cached_chunk.data
+                        [self.cached_chunk.ptr..self.cached_chunk.ptr + remaining],
                 );
-                self.cached_chunk.ptr = self.cached_chunk.ptr + size;
-                size = 0;
+                self.cached_chunk.ptr += remaining;
+                total_bytes_read += remaining;
+                remaining = 0;
             } else {
-                data.extend(&self.cached_chunk.data[self.cached_chunk.ptr..]);
-                size = size - (self.volume.chunk_size() - self.cached_chunk.ptr);
-                self.cached_chunk.ptr = self.volume.chunk_size();
+                // Otherwise, copy what is available.
+                buf[total_bytes_read..total_bytes_read + available_in_chunk]
+                    .copy_from_slice(&self.cached_chunk.data[self.cached_chunk.ptr..]);
+                total_bytes_read += available_in_chunk;
+                remaining -= available_in_chunk;
+                self.cached_chunk.ptr = current_chunk; // Now pointer at the end of the chunk.
+
+                // Now move to the next chunk if it exists.
                 if self.cached_chunk.segment < self.segments.len()
                     || (self.cached_chunk.segment == self.segments.len()
                         && self.cached_chunk.number + 1
                             < self.chunks[&self.cached_chunk.segment].len())
                 {
-                    // We get the next chunk number
+                    // Determine the next chunk.
                     if self.cached_chunk.number + 1 < self.chunks[&self.cached_chunk.segment].len()
                     {
                         self.cached_chunk.number += 1;
                     } else {
                         if self.cached_chunk.segment + 1 <= self.segments.len() {
-                            self.cached_chunk.number = 0;
                             self.cached_chunk.segment += 1;
+                            self.cached_chunk.number = 0;
                         } else {
-                            eprintln!("Could not read the next chunk");
-                            std::process::exit(1);
+                            // No further chunk can be read.
+                            break;
                         }
                     }
+                    // Read in the next chunk.
                     self.cached_chunk.data =
                         self.read_chunk(self.cached_chunk.segment, self.cached_chunk.number);
                     self.cached_chunk.ptr = 0;
                 } else {
-                    return data;
+                    // No more data available.
+                    break;
                 }
             }
         }
-        return data;
+        total_bytes_read
     }
 
-    pub fn seek(&mut self, offset: usize) {
+    fn ewf_seek(&mut self, offset: usize) -> io::Result<()> {
         if offset > self.volume.max_offset() {
-            eprintln!("Could not seek to the requested offset: 0x{:x}, the offset is higher than the volume's maximum offset ", offset);
-            std::process::exit(1);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Could not seek to the requested offset: 0x{:x}, the offset is higher than the volume's maximum offset",
+                    offset
+                ),
+            ));
         }
 
-        let mut chunk_number = offset / self.volume.chunk_size();
+        let chunk_size = self.volume.chunk_size();
+        // Calculate the global chunk number
+        let mut chunk_number = offset / chunk_size;
         if chunk_number >= self.volume.chunk_count as usize {
-            eprintln!("Error the chunk number requested ({:?}) is higher than the total number of chunk ({:?}).",chunk_number,  self.volume.chunk_count);
-            std::process::exit(1);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Error: the requested chunk number ({:?}) is higher than the total number of chunks ({:?}).",
+                    chunk_number, self.volume.chunk_count
+                ),
+            ));
         }
 
+        // Determine which segment contains this chunk.
         let mut segment = 1;
-        while self.chunks[&segment][0].chunk_number > chunk_number
-            || chunk_number > self.chunks[&segment].last().unwrap().chunk_number
-                && segment < self.segments.len()
+        while segment < self.segments.len()
+            && (self.chunks[&segment][0].chunk_number > chunk_number
+                || chunk_number > self.chunks[&segment].last().unwrap().chunk_number)
         {
             segment += 1;
         }
 
+        // Adjust the chunk number relative to the chosen segment.
         chunk_number = chunk_number - self.chunks[&segment][0].chunk_number;
+
+        // Read the new chunk and update the cached chunk state.
         self.cached_chunk.data = self.read_chunk(segment, chunk_number);
         self.cached_chunk.number = chunk_number;
         self.cached_chunk.segment = segment;
-        self.cached_chunk.ptr = offset % self.volume.chunk_size();
+        self.cached_chunk.ptr = offset % chunk_size;
+
+        // Update the current position for later reference if needed.
+        self.position = offset as u64;
+        Ok(())
+    }
+}
+
+impl Read for EWF {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes_read = self.ewf_read(buf);
+        if bytes_read == 0 {
+            Ok(0)
+        } else {
+            Ok(bytes_read)
+        }
+    }
+}
+
+impl Seek for EWF {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        // Determine new absolute offset based on the current position and pos parameter.
+        let new_offset: i64 = match pos {
+            SeekFrom::Start(offset) => offset as i64,
+            SeekFrom::Current(offset) => self.position as i64 + offset,
+            SeekFrom::End(offset) => self.volume.max_offset() as i64 + offset,
+        };
+
+        // Check for negative seeking.
+        if new_offset < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid seek to a negative position",
+            ));
+        }
+
+        // Convert to usize after checking that new_offset is non-negative.
+        let new_offset_usize = new_offset as usize;
+        self.ewf_seek(new_offset_usize)?;
+        Ok(new_offset as u64)
     }
 }
 

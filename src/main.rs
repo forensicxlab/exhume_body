@@ -2,7 +2,7 @@ use clap::{Arg, ArgAction, Command};
 use exhume_body::Body;
 use std;
 
-fn process_file(file_path: &str, format: &str, size: &usize, offset: &usize, verbose: &bool) {
+fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64, verbose: &bool) {
     let mut reader: Body;
     match format {
         "raw" => {
@@ -79,7 +79,7 @@ fn main() {
             Arg::new("offset")
                 .short('o')
                 .long("offset")
-                .value_parser(clap::value_parser!(usize))
+                .value_parser(clap::value_parser!(u64))
                 .required(false)
                 .help("Read at a specific offset."),
         )
@@ -94,9 +94,9 @@ fn main() {
     let file_path = matches.get_one::<String>("body").unwrap();
     let format = matches.get_one::<String>("format").unwrap();
     let size = matches.get_one::<usize>("size").unwrap();
-    let offset = match matches.get_one::<usize>("offset") {
+    let offset = match matches.get_one::<u64>("offset") {
         Some(offset) => offset,
-        None => &(0 as usize),
+        None => &(0),
     };
     let verbose = match matches.get_one::<bool>("verbose") {
         Some(verbose) => verbose,
