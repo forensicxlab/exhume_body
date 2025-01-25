@@ -1,6 +1,6 @@
 use clap::{Arg, ArgAction, Command};
 use exhume_body::Body;
-use std;
+use std::io::{Read, Seek, SeekFrom};
 
 fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64, verbose: &bool) {
     let mut reader: Body;
@@ -40,8 +40,9 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64, verbo
         }
     }
     // Seek to the offset
-    reader.seek(*offset);
-    let bytes = reader.read(*size);
+    reader.seek(SeekFrom::Start(*offset)).unwrap();
+    let mut bytes = vec![0u8; *size];
+    reader.read(&mut bytes).unwrap();
     let result = String::from_utf8_lossy(&bytes);
     println!("{}", result);
 }

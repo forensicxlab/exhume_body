@@ -4,7 +4,7 @@ pub mod raw;
 use ewf::EWF;
 use raw::RAW;
 
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Result, Seek, SeekFrom};
 
 pub enum BodyFormat {
     RAW {
@@ -71,37 +71,43 @@ impl Body {
         println!("Evidence : {}", self.path);
     }
 
-    pub fn read(&mut self, size: usize) -> Vec<u8> {
-        let mut buffer = vec![0; size];
-        match self.format {
-            BodyFormat::EWF { ref mut image, .. } => {
-                let bytes_read = image.read(&mut buffer).unwrap();
-                println!(
-                    "Read {} bytes using the EWF format method directly.",
-                    bytes_read
-                );
-                buffer
-            }
-            BodyFormat::RAW { ref mut image, .. } => image.read(size),
-            // All other compatible formats will be handled here.
-        }
-    }
-
-    pub fn seek(&mut self, offset: u64) {
-        match self.format {
-            BodyFormat::EWF { ref mut image, .. } => {
-                let u = image.seek(SeekFrom::Start(offset)).unwrap();
-            }
-            BodyFormat::RAW { ref mut image, .. } => image.seek(offset),
-            // All other compatible formats will be handled here.
-        }
-    }
-
     pub fn get_sector_size(&self) -> u16 {
         match &self.format {
             BodyFormat::EWF { image, .. } => image.get_sector_size(),
             BodyFormat::RAW { .. } => 512,
             // All other compatible formats will be handled here.
+        }
+    }
+}
+
+impl Read for Body {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        match &mut self.format {
+            BodyFormat::EWF { image, .. } => {
+                let bytes_read = image.read(buf)?;
+                println!(
+                    "Read {} bytes using the EWF format method directly.",
+                    bytes_read
+                );
+                Ok(bytes_read)
+            }
+            BodyFormat::RAW { image, .. } => image.read(buf),
+            // Handle other compatible formats here.
+            // BodyFormat::Other { image, .. } => image.read(buf),
+        }
+    }
+}
+
+impl Seek for Body {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        match &mut self.format {
+            BodyFormat::EWF { image, .. } => {
+                let new_pos = image.seek(pos)?;
+                Ok(new_pos)
+            }
+            BodyFormat::RAW { image, .. } => image.seek(pos),
+            // Handle other compatible formats here.
+            // BodyFormat::Other { image, .. } => image.seek(pos),
         }
     }
 }
