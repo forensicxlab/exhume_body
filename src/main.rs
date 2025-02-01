@@ -1,6 +1,6 @@
 use clap::{Arg, ArgAction, Command};
 use exhume_body::Body;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 
 fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64, verbose: &bool) {
     let mut reader: Body;
@@ -9,7 +9,7 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64, verbo
             if *verbose {
                 println!("Processing the file '{}' in 'raw' format...", file_path);
             }
-            reader = Body::new(file_path.to_string(), format);
+            reader = Body::new_from(file_path.to_string(), format, Some(*offset));
             if *verbose {
                 reader.print_info();
                 println!("------------------------------------------------------------");
@@ -19,7 +19,7 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64, verbo
             }
         }
         "ewf" => {
-            reader = Body::new(file_path.to_string(), format);
+            reader = Body::new_from(file_path.to_string(), format, Some(*offset));
             if *verbose {
                 println!("Processing the file '{}' in 'ewf' format...", file_path);
             }
@@ -39,8 +39,6 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64, verbo
             std::process::exit(1);
         }
     }
-    // Seek to the offset
-    reader.seek(SeekFrom::Start(*offset)).unwrap();
     let mut bytes = vec![0u8; *size];
     reader.read(&mut bytes).unwrap();
     let result = String::from_utf8_lossy(&bytes);

@@ -67,6 +67,19 @@ impl Body {
         }
     }
 
+    pub fn new_from(file_path: String, format: &str, offset: Option<u64>) -> Body {
+        let mut body = Body::new(file_path, format);
+
+        if let Some(off) = offset {
+            if let Err(e) = body.seek(SeekFrom::Start(off)) {
+                eprintln!("Error seeking to offset {}: {}", off, e);
+                std::process::exit(1);
+            }
+        }
+
+        body
+    }
+
     pub fn print_info(&self) {
         println!("Evidence : {}", self.path);
     }
@@ -85,14 +98,10 @@ impl Read for Body {
         match &mut self.format {
             BodyFormat::EWF { image, .. } => {
                 let bytes_read = image.read(buf)?;
-                println!(
-                    "Read {} bytes using the EWF format method directly.",
-                    bytes_read
-                );
                 Ok(bytes_read)
             }
             BodyFormat::RAW { image, .. } => image.read(buf),
-            // Handle other compatible formats here.
+            // TODO: Handle other compatible formats here.
             // BodyFormat::Other { image, .. } => image.read(buf),
         }
     }
@@ -106,7 +115,7 @@ impl Seek for Body {
                 Ok(new_pos)
             }
             BodyFormat::RAW { image, .. } => image.seek(pos),
-            // Handle other compatible formats here.
+            // TODO: Handle other compatible formats here.
             // BodyFormat::Other { image, .. } => image.seek(pos),
         }
     }
