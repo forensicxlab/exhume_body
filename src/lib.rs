@@ -1,7 +1,9 @@
+//#![no_std]
+
 pub mod ewf;
 pub mod raw;
-
 use ewf::EWF;
+use log::{error, info};
 use raw::RAW;
 
 use std::io::{Read, Result, Seek, SeekFrom};
@@ -28,7 +30,7 @@ impl Body {
                 let evidence = match EWF::new(&file_path) {
                     Ok(ewf) => ewf,
                     Err(err) => {
-                        eprintln!("Error: {}", err);
+                        error!("Error: {}", err);
                         std::process::exit(1);
                     }
                 };
@@ -44,7 +46,7 @@ impl Body {
                 let evidence = match RAW::new(&file_path) {
                     Ok(evidence) => evidence,
                     Err(err) => {
-                        eprintln!("Error: {}", err);
+                        error!("Error: {}", err);
                         std::process::exit(1);
                     }
                 };
@@ -58,7 +60,7 @@ impl Body {
                 };
             }
             _ => {
-                eprintln!(
+                error!(
                     "Error: Invalid format '{}'. Supported formats are 'raw' and 'ewf'.",
                     format
                 );
@@ -72,7 +74,7 @@ impl Body {
 
         if let Some(off) = offset {
             if let Err(e) = body.seek(SeekFrom::Start(off)) {
-                eprintln!("Error seeking to offset {}: {}", off, e);
+                error!("Error seeking to offset {}: {}", off, e);
                 std::process::exit(1);
             }
         }
@@ -81,7 +83,7 @@ impl Body {
     }
 
     pub fn print_info(&self) {
-        println!("Evidence : {}", self.path);
+        info!("Evidence : {}", self.path);
     }
 
     pub fn get_sector_size(&self) -> u16 {

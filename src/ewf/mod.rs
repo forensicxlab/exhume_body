@@ -1,4 +1,5 @@
 use flate2::read::ZlibDecoder;
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -269,7 +270,6 @@ impl EWF {
 
         loop {
             let section: EwfSectionDescriptor = EwfSectionDescriptor::new(&file, current_offset);
-            //section.print_info();
             let section_offset = section.next_section_offset.clone();
             let section_size = section.section_size.clone();
             let section_type = section.section_type_def.clone();
@@ -320,12 +320,12 @@ impl EWF {
     }
 
     fn read_chunk(&self, segment: usize, chunk_number: usize) -> Vec<u8> {
-        // println!(
-        //     "Reading chunk number {:?}, segment {:?}",
-        //     chunk_number, segment
-        // );
+        debug!(
+            "Reading chunk number {:?}, segment {:?}",
+            chunk_number, segment
+        );
         if chunk_number >= self.chunks.get(&segment).unwrap().len() {
-            eprintln!(
+            error!(
                 "Could not read chunk number {:?} in segment number {:?}",
                 chunk_number, segment
             );
