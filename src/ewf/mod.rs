@@ -1,5 +1,5 @@
 use flate2::read::ZlibDecoder;
-use log::{debug, error, info};
+use log::{debug, error};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
