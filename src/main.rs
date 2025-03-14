@@ -1,5 +1,5 @@
 use clap::{value_parser, Arg, Command};
-use exhume_body::Body;
+use exhume_body::{Body, BodySlice};
 use log::{debug, error, info, LevelFilter};
 use std::io::Read;
 
@@ -23,6 +23,7 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64) {
             debug!("------------------------------------------------------------");
             debug!("Selected format: EWF");
             debug!("Description: Expert Witness Format.");
+            debug!("Sector size: {:?}", reader.get_sector_size());
             debug!("------------------------------------------------------------");
         }
         _ => {
