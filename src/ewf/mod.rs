@@ -1,5 +1,5 @@
 use flate2::read::ZlibDecoder;
-use log::{debug, error};
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -207,6 +207,34 @@ impl EWF {
             };
         }
         return Ok(ewf);
+    }
+
+    /// Print useful information about the EWF file
+    pub fn print_info(&self) {
+        info!("EWF File Information:");
+
+        // Print number of segments
+        info!("Number of Segments: {}", self.segments.len());
+
+        // Print volume information
+        info!("Volume Information:");
+        info!("  Chunk Count: {}", self.volume.chunk_count);
+        info!("  Sectors Per Chunk: {}", self.volume.sector_per_chunk);
+        info!("  Bytes Per Sector: {}", self.volume.bytes_per_sector);
+        info!("  Total Sector Count: {}", self.volume.total_sector_count);
+
+        // Print each segment with its associated chunks
+        info!("Chunk Information:");
+        for (segment_number, chunks) in &self.chunks {
+            info!("  Segment Number: {}", segment_number);
+            info!("  Number of Chunks: {}", chunks.len());
+            for chunk in chunks {
+                debug!(
+                    "    Chunk Number: {} - Compressed: {} - Data Offset: {}",
+                    chunk.chunk_number, chunk.compressed, chunk.data_offset
+                );
+            }
+        }
     }
 
     pub fn get_sector_size(&self) -> u16 {

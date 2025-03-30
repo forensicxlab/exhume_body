@@ -12,7 +12,6 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
             reader = Body::new_from(file_path.to_string(), format, Some(*offset));
             // Assuming reader.print_info() is safe to call; if it uses println!,
             // you might consider modifying it as well.
-            reader.print_info();
             debug!("------------------------------------------------------------");
             info!("Selected format: RAW");
             info!("Description: Raw Data");
@@ -39,6 +38,8 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
             std::process::exit(1);
         }
     }
+    reader.print_info();
+
     let mut bytes = vec![0u8; *size as usize];
     reader.read(&mut bytes).unwrap();
     let result = String::from_utf8_lossy(&bytes);

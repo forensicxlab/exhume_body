@@ -92,6 +92,11 @@ impl Body {
 
     pub fn print_info(&self) {
         info!("Evidence : {}", self.path);
+        match &self.format {
+            BodyFormat::EWF { image, .. } => image.print_info(),
+            BodyFormat::RAW { .. } => (),
+            // All other compatible formats will be handled here.
+        }
     }
 
     pub fn get_sector_size(&self) -> u16 {
