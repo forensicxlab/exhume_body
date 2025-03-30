@@ -116,25 +116,27 @@ impl Body {
     fn detect_format(file_path: &str) -> BodyFormat {
         // Try EWF detection first.
         if let Ok(evidence) = EWF::new(file_path) {
+            info!("Detected an EWF disk image.");
             return BodyFormat::EWF {
                 image: evidence,
                 description: "Expert Witness Compression Format (EWF)".to_string(),
             };
         }
-        // More format detections can be added here in the future.
 
         // Default to RAW.
-        let evidence = match RAW::new(file_path) {
-            Ok(evidence) => evidence,
+        match RAW::new(file_path) {
+            Ok(evidence) => {
+                info!("Detected RAW Data");
+                return BodyFormat::RAW {
+                    image: evidence,
+                    description: "Raw image format".to_string(),
+                };
+            }
             Err(err) => {
-                error!("Error opening RAW image: {}", err);
+                error!("Error opening data: {}", err);
                 std::process::exit(1);
             }
         };
-        BodyFormat::RAW {
-            image: evidence,
-            description: "Raw image format".to_string(),
-        }
     }
 }
 

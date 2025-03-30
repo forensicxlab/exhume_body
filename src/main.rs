@@ -1,9 +1,10 @@
 use clap::{value_parser, Arg, Command};
-use exhume_body::{Body, BodySlice};
+use clap_num::maybe_hex;
+use exhume_body::Body;
 use log::{debug, error, info, LevelFilter};
 use std::io::Read;
 
-fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64) {
+fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
     let mut reader: Body;
     match format {
         "raw" => {
@@ -13,31 +14,35 @@ fn process_file(file_path: &str, format: &str, size: &usize, offset: &u64) {
             // you might consider modifying it as well.
             reader.print_info();
             debug!("------------------------------------------------------------");
-            debug!("Selected format: RAW");
-            debug!("Description: Raw Data");
+            info!("Selected format: RAW");
+            info!("Description: Raw Data");
             debug!("------------------------------------------------------------");
         }
         "ewf" => {
             reader = Body::new_from(file_path.to_string(), format, Some(*offset));
-            debug!("Processing the file '{}' in 'ewf' format...", file_path);
+            info!("Processing the file '{}' in 'ewf' format...", file_path);
+            info!("------------------------------------------------------------");
+            info!("Selected format: EWF");
+            info!("Description: Expert Witness Format.");
+            info!("Sector size: {:?}", reader.get_sector_size());
             debug!("------------------------------------------------------------");
-            debug!("Selected format: EWF");
-            debug!("Description: Expert Witness Format.");
-            debug!("Sector size: {:?}", reader.get_sector_size());
-            debug!("------------------------------------------------------------");
+        }
+        "auto" => {
+            info!("Processing the file '{}' in 'auto' format...", file_path);
+            reader = Body::new_from(file_path.to_string(), format, Some(*offset));
         }
         _ => {
             error!(
-                "Invalid format '{}'. Supported formats are 'raw' and 'ewf'.",
+                "Invalid format '{}'. Supported formats are 'raw', 'ewf', and 'auto'.",
                 format
             );
             std::process::exit(1);
         }
     }
-    let mut bytes = vec![0u8; *size];
+    let mut bytes = vec![0u8; *size as usize];
     reader.read(&mut bytes).unwrap();
     let result = String::from_utf8_lossy(&bytes);
-    info!("{}", result);
+    println!("{}", result);
 }
 
 fn main() {
@@ -58,14 +63,14 @@ fn main() {
                 .short('f')
                 .long("format")
                 .value_parser(value_parser!(String))
-                .required(true)
-                .help("The format of the file, either 'raw' or 'ewf'."),
+                .required(false)
+                .help("The format of the file, either 'raw', 'ewf', or 'auto'."),
         )
         .arg(
             Arg::new("size")
                 .short('s')
                 .long("size")
-                .value_parser(value_parser!(usize))
+                .value_parser(maybe_hex::<u64>)
                 .required(true)
                 .help("The size (in bytes) to read."),
         )
@@ -73,7 +78,7 @@ fn main() {
             Arg::new("offset")
                 .short('o')
                 .long("offset")
-                .value_parser(value_parser!(u64))
+                .value_parser(maybe_hex::<u64>)
                 .required(false)
                 .help("Read at a specific offset."),
         )
@@ -101,8 +106,9 @@ fn main() {
     env_logger::Builder::new().filter_level(level_filter).init();
 
     let file_path = matches.get_one::<String>("body").unwrap();
-    let format = matches.get_one::<String>("format").unwrap();
-    let size = matches.get_one::<usize>("size").unwrap();
+    let auto = String::from("auto");
+    let format = matches.get_one::<String>("format").unwrap_or(&auto);
+    let size = matches.get_one::<u64>("size").unwrap();
     let offset = matches.get_one::<u64>("offset").unwrap_or(&0);
 
     process_file(file_path, format, size, offset);
