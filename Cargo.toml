@@ -5,6 +5,8 @@ edition = "2021"
 description = "Format-agnostic data extraction from disk images and other potential data structures."
 documentation = "https://www.forensicxlab.com/docs/exhume_body/"
 authors = ["k1nd0ne"]
+license = "GPL-2.0-or-later"
+
 
 [dependencies]
 flate2 = "1.0.25"
