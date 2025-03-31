@@ -2,6 +2,9 @@
 name = "exhume_body"
 version = "0.1.0"
 edition = "2021"
+description = "Format-agnostic data extraction from disk images and other potential data structures."
+documentation = "https://www.forensicxlab.com/docs/exhume_body/"
+authors = ["k1nd0ne"]
 
 [dependencies]
 flate2 = "1.0.25"
