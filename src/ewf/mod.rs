@@ -5,12 +5,13 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct EwfHeader {
     _signature: [u8; 8], // 8 bytes
     segment_number: u16, // 2 bytes
 }
 
+#[derive(Clone)]
 struct EwfSectionDescriptor {
     // Ref : https://github.com/libyal/libewf/blob/main/documentation/Expert%20Witness%20Compression%20Format%20(EWF).asciidoc#31-section-descriptor
     section_type_def: String, // 16 bytes
@@ -19,13 +20,13 @@ struct EwfSectionDescriptor {
     _checksum: u32,           // 4 bytes
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct EwfHeaderSection {
     // Ref: https://github.com/libyal/libewf/blob/main/documentation/Expert%20Witness%20Compression%20Format%20(EWF).asciidoc#34-header-section
     _data: Vec<u8>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct EwfVolumeSection {
     // Ref : https://github.com/libyal/libewf/blob/main/documentation/Expert%20Witness%20Compression%20Format%20(EWF).asciidoc#35-volume-section
     chunk_count: u32,
@@ -34,11 +35,14 @@ struct EwfVolumeSection {
     total_sector_count: u32,
 }
 
+#[derive(Clone)]
 struct Chunk {
     compressed: bool,    // Am I compressed ?
     data_offset: u64,    // Where are my data starting ?
     chunk_number: usize, // What is my chunk number (absolute) ?
 }
+
+#[derive(Clone)]
 struct ChunkCache {
     number: usize,
     segment: usize,
@@ -505,6 +509,32 @@ impl EWF {
         // Update the current position for later reference if needed.
         self.position = offset as u64;
         Ok(())
+    }
+}
+
+impl Clone for EWF {
+    fn clone(&self) -> Self {
+        let segments = self
+            .segments
+            .iter()
+            .map(|fd| {
+                fd.try_clone()
+                    .expect("failed to duplicate segment descriptor")
+            })
+            .collect();
+
+        Self {
+            segments,
+            ewf_header: self.ewf_header.clone(),
+            sections: self.sections.clone(),
+            header: self.header.clone(),
+            volume: self.volume.clone(),
+            chunks: self.chunks.clone(),
+            end_of_sectors: self.end_of_sectors.clone(),
+            cached_chunk: self.cached_chunk.clone(),
+            chunk_count: self.chunk_count,
+            position: self.position,
+        }
     }
 }
 

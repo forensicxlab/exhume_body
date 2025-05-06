@@ -8,6 +8,7 @@ use raw::RAW;
 
 use std::io::{self, Read, Seek, SeekFrom};
 
+#[derive(Clone)]
 pub enum BodyFormat {
     RAW {
         image: raw::RAW,
@@ -20,6 +21,7 @@ pub enum BodyFormat {
     // Other compatible image formats here.
 }
 
+#[derive(Clone)]
 pub struct Body {
     pub path: String,
     pub format: BodyFormat,
@@ -165,19 +167,18 @@ impl Seek for Body {
     }
 }
 
-pub struct BodySlice<'a> {
-    body: &'a mut Body,
+pub struct BodySlice {
+    body: Body,
     slice_start: u64,
     slice_len: u64,
-    pos: u64, // relative position within the slice
+    pos: u64,
 }
 
-impl<'a> BodySlice<'a> {
-    /// Creates a new BodySlice starting at `slice_start` with length `slice_len`.
-    /// Seeks the underlying Body to the starting offset.
-    pub fn new(body: &'a mut Body, slice_start: u64, slice_len: u64) -> io::Result<BodySlice<'a>> {
+impl BodySlice {
+    pub fn new(src: &Body, slice_start: u64, slice_len: u64) -> io::Result<Self> {
+        let mut body = src.clone();
         body.seek(SeekFrom::Start(slice_start))?;
-        Ok(BodySlice {
+        Ok(Self {
             body,
             slice_start,
             slice_len,
@@ -186,49 +187,51 @@ impl<'a> BodySlice<'a> {
     }
 }
 
-impl<'a> Read for BodySlice<'a> {
+impl Read for BodySlice {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.pos >= self.slice_len {
-            return Ok(0); // End of slice
+            return Ok(0);
         }
-        // Calculate how many bytes we can read without exceeding the slice limit
         let max = std::cmp::min(buf.len() as u64, self.slice_len - self.pos) as usize;
+
         let n = self.body.read(&mut buf[..max])?;
         self.pos += n as u64;
         Ok(n)
     }
 }
 
-impl<'a> Seek for BodySlice<'a> {
+impl Seek for BodySlice {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let new_pos = match pos {
             SeekFrom::Start(off) => off,
-            SeekFrom::Current(off) => {
-                let pos = self.pos as i64 + off;
-                if pos < 0 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "negative seek"));
-                }
-                pos as u64
-            }
-            SeekFrom::End(off) => {
-                let pos = self.slice_len as i64 + off;
-                if pos < 0 {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "negative seek"));
-                }
-                pos as u64
-            }
+            SeekFrom::Current(off) => (self.pos as i64 + off) as u64,
+            SeekFrom::End(off) => (self.slice_len as i64 + off) as u64,
         };
 
         if new_pos > self.slice_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "seek out of bounds",
+                "seek out of slice",
             ));
         }
-        // Move the underlying body to the new absolute position
+
         self.body
             .seek(SeekFrom::Start(self.slice_start + new_pos))?;
         self.pos = new_pos;
-        Ok(new_pos)
+        Ok(self.pos)
+    }
+}
+
+impl Clone for BodySlice {
+    fn clone(&self) -> Self {
+        let mut body = self.body.clone();
+        // replicate cursor state
+        body.seek(SeekFrom::Start(self.slice_start + self.pos)).ok();
+        Self {
+            body,
+            slice_start: self.slice_start,
+            slice_len: self.slice_len,
+            pos: self.pos,
+        }
     }
 }

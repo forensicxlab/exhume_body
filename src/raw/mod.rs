@@ -27,6 +27,17 @@ impl RAW {
     }
 }
 
+impl Clone for RAW {
+    fn clone(&self) -> Self {
+        Self {
+            file: self
+                .file
+                .try_clone()
+                .expect("failed to clone RAW file handle"),
+        }
+    }
+}
+
 impl Read for RAW {
     /// Reads data from the file into the provided buffer.
     ///

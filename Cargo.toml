@@ -6,6 +6,7 @@ description = "Format-agnostic data extraction from disk images and other potent
 documentation = "https://www.forensicxlab.com/docs/category/exhume---body"
 authors = ["k1nd0ne"]
 license = "GPL-2.0-or-later"
+readme = "README.md"
 
 
 [dependencies]
