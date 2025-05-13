@@ -2,6 +2,7 @@
 
 pub mod ewf;
 pub mod raw;
+pub mod vmdk;
 use ewf::EWF;
 use log::{error, info};
 use raw::RAW;
