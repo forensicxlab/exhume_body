@@ -628,8 +628,7 @@ impl VMDK {
         if let Some(ref disk_database) = self.descriptor_file.disk_database {
             if let Some(sectors) = disk_database.ddb_geometry_sectors {
                 // Maybe we shouldn't rely on this information and rather use the number of sectors from the extent descriptions
-                info!("  Disk Size: {} sectors", sectors);
-                info!("  Disk Size: {} bytes", sectors * SECTOR_SIZE);
+                info!("  Disk sectors: {} sectors", sectors);
             }
             if let Some(ref tools) = disk_database.ddb_tools_version {
                 info!("  Guest tools Version: {}", tools);
