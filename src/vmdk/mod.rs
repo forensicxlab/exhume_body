@@ -6,10 +6,11 @@
 
 use std::{collections::HashMap, fs::{self, File}, str::FromStr, sync::LazyLock};
 
+use log::info;
 use regex::Regex;
 use strum::EnumString;
 
-const SECTOR_SIZE: u16 = 512;
+const SECTOR_SIZE: u32 = 512;
 const DESCRIPTOR_FILE_SIGNATURE: &'static str = "# Disk DescriptorFile";
 const DESCRIPTOR_FILE_EXTENT_SECTION_SIGNATURE: &'static str = "# Extent description";
 const DESCRIPTOR_FILE_CHANGE_TRACKING_SECTION_SIGNATURE: &'static str  = "# Change Tracking File";
@@ -516,9 +517,34 @@ impl VMDK {
     }
 
     pub fn print_info(&self) {
+        info!("VMDK Disk Information:");
+
+        info!("  Disk Type: {:?}", self.descriptor_file.header.create_type);
+        info!("  Extent list:");
+        for extent in &self.descriptor_file.extent_descriptions {
+            info!(
+                "    - Extent file: {}, Number of sectors: {}, Start sector: {}", 
+                extent.extent_file_name.as_deref().unwrap_or("<unknown>"), 
+                extent.sector_number, 
+                extent.extent_start_sector.unwrap_or(0)
+            );
+        }
+        info!("  Disk ID: {:x}", self.descriptor_file.header.cid);
+        if let Some(ref disk_database) = self.descriptor_file.disk_database {
+            if let Some(sectors) = disk_database.ddb_geometry_sectors {
+                info!("  Disk Size: {} sectors", sectors);
+                info!("  Disk Size: {} bytes", sectors * SECTOR_SIZE);
+            }
+            if let Some(ref tools) = disk_database.ddb_tools_version {
+                info!("  Guest tools Version: {}", tools);
+            }
+            if let Some(thin_provisioned) = disk_database.ddb_thin_provisioned {
+                info!("  Thin Provisioned: {}", thin_provisioned);
+            }
+        }
     }
 
-    pub fn get_sector_size(&self) -> u16 {
+    pub fn get_sector_size(&self) -> u32 {
         SECTOR_SIZE
     }
 }
