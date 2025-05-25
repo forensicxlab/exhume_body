@@ -6,6 +6,7 @@ pub mod vmdk;
 use ewf::EWF;
 use log::{error, info};
 use raw::RAW;
+use vmdk::VMDK;
 
 use std::io::{self, Read, Seek, SeekFrom};
 
@@ -17,6 +18,10 @@ pub enum BodyFormat {
     },
     EWF {
         image: ewf::EWF,
+        description: String,
+    },
+    VMDK {
+        image: vmdk::VMDK,
         description: String,
     },
     // Other compatible image formats here.
@@ -53,6 +58,22 @@ impl Body {
                     format: BodyFormat::EWF {
                         image: evidence,
                         description: "Expert Witness Compression Format".to_string(),
+                    },
+                }
+            }
+            "vmdk" => {
+                let evidence = match VMDK::new(&file_path) {
+                    Ok(evidence) => evidence,
+                    Err(err) => {
+                        error!("Error: {}", err);
+                        std::process::exit(1);
+                    }
+                };
+                Body {
+                    path: file_path,
+                    format: BodyFormat::VMDK {
+                        image: evidence,
+                        description: "VMDK (Virtual Machine Disk) file".to_string(),
                     },
                 }
             }
@@ -97,6 +118,7 @@ impl Body {
         info!("Evidence : {}", self.path);
         match &self.format {
             BodyFormat::EWF { image, .. } => image.print_info(),
+            BodyFormat::VMDK { image, .. } => image.print_info(),
             BodyFormat::RAW { .. } => (),
             // All other compatible formats will be handled here.
         }
@@ -105,6 +127,7 @@ impl Body {
     pub fn get_sector_size(&self) -> u16 {
         match &self.format {
             BodyFormat::EWF { image, .. } => image.get_sector_size(),
+            BodyFormat::VMDK { image,.. } => image.get_sector_size() as u16,
             BodyFormat::RAW { .. } => 512,
             // All other compatible formats will be handled here.
         }
@@ -114,6 +137,7 @@ impl Body {
     pub fn format_description(&self) -> &str {
         match &self.format {
             BodyFormat::EWF { description, .. } => description,
+            BodyFormat::VMDK { description , ..} => description,
             BodyFormat::RAW { description, .. } => description,
             // Handle additional formats here.
         }
@@ -128,6 +152,15 @@ impl Body {
             return BodyFormat::EWF {
                 image: evidence,
                 description: "Expert Witness Compression Format (EWF)".to_string(),
+            };
+        }
+
+        // Then try VMDK detection.
+        if let Ok(evidence) = VMDK::new(file_path) {
+            info!("Detected a VMDK disk image.");
+            return BodyFormat::VMDK {
+                image: evidence,
+                description: "VMDK (Virtual Machine Disk) file".to_string(),
             };
         }
 
@@ -152,6 +185,7 @@ impl Read for Body {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match &mut self.format {
             BodyFormat::EWF { image, .. } => image.read(buf),
+            BodyFormat::VMDK { image, .. } => image.read(buf),
             BodyFormat::RAW { image, .. } => image.read(buf),
             // TODO: Handle other compatible formats here.
         }
@@ -162,6 +196,7 @@ impl Seek for Body {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match &mut self.format {
             BodyFormat::EWF { image, .. } => image.seek(pos),
+            BodyFormat::VMDK { image, .. } => image.seek(pos),
             BodyFormat::RAW { image, .. } => image.seek(pos),
             // TODO: Handle other compatible formats here.
         }

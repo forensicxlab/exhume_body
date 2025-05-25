@@ -4,13 +4,13 @@
 //! 
 //! For the moment VMDK descriptor files not written in UTF-8 encoding are not supported.
 
-use std::{collections::HashMap, fs::{self, File}, str::FromStr, sync::LazyLock};
+use std::{collections::HashMap, fs::{self, File}, io::{self, Read, Seek, SeekFrom}, path::Path, str::FromStr, sync::LazyLock, u64};
 
-use log::info;
+use log::{debug, error, info};
 use regex::Regex;
 use strum::EnumString;
 
-const SECTOR_SIZE: u32 = 512;
+const SECTOR_SIZE: u64 = 512;
 const DESCRIPTOR_FILE_SIGNATURE: &'static str = "# Disk DescriptorFile";
 const DESCRIPTOR_FILE_EXTENT_SECTION_SIGNATURE: &'static str = "# Extent description";
 const DESCRIPTOR_FILE_CHANGE_TRACKING_SECTION_SIGNATURE: &'static str  = "# Change Tracking File";
@@ -19,7 +19,7 @@ const DESCRIPTOR_FILE_DISK_DATABASE_SECTION_SIGNATURE: &'static str = "# The Dis
 /// Represents the character encoding used for the descriptor file.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blame/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#211-encodings
-#[derive(Debug, EnumString, PartialEq)]
+#[derive(Debug, EnumString, PartialEq, Clone)]
 enum VMDKEncoding {
     /// UTF-8 encoding
     #[strum(serialize = "UTF-8")]
@@ -42,6 +42,7 @@ enum VMDKEncoding {
 }
 
 /// Represents a VMDK header section in a VMDK descriptor file.
+#[derive(Clone)]
 struct VMDKHeader {
     /// The VMDK version number, must be 1, 2 or 3.
     version: u8,
@@ -103,7 +104,7 @@ impl TryFrom<HashMap<String, String>> for VMDKHeader {
 }
 
 /// Access mode for an extent.
-#[derive(Debug, EnumString, PartialEq)]
+#[derive(Debug, EnumString, PartialEq, Clone)]
 #[strum(serialize_all = "UPPERCASE")]
 enum VMDKExtentAccessMode {
     /// No access
@@ -114,7 +115,7 @@ enum VMDKExtentAccessMode {
     Rw,
 }
 
-#[derive(Debug, EnumString, PartialEq)]
+#[derive(Debug, EnumString, PartialEq, Clone)]
 #[strum(serialize_all = "UPPERCASE")]
 enum VMDKExtentType {
     /// RAW extent data file
@@ -133,6 +134,7 @@ enum VMDKExtentType {
 }
 
 /// The extent descriptor allows to locate data within the extent files of the virtual disk.
+#[derive(Clone)]
 struct VMDKExtentDescriptor {
     /// Access mode for the extent
     access_mode: VMDKExtentAccessMode,
@@ -181,12 +183,13 @@ impl FromStr for VMDKExtentDescriptor {
 }
 
 /// The change tracking file section was introduced in version 3 and seems to allow definition of a file log of changes made to the virtual disk.
+#[derive(Clone)]
 struct VMDKChangeTrackingSection {
     /// Path of the change tracking file.
     change_track_path: String,
 }
 
-#[derive(Debug, EnumString, PartialEq)]
+#[derive(Debug, EnumString, PartialEq, Clone)]
 enum VMDKDiskAdapterType {
     #[strum(serialize = "ide")]
     Ide,
@@ -198,6 +201,8 @@ enum VMDKDiskAdapterType {
     LegacyESX,
 }
 
+
+#[derive(Clone)]
 struct VMDKDiskDatabase {
     /// Most encountered value is true
     ddb_deletable: Option<bool>,
@@ -211,17 +216,17 @@ struct VMDKDiskDatabase {
     /// 128-bit base16 encoded value, with spaces between bytes
     ddb_uuid: Option<String>,
     /// The number of cylinders
-    ddb_geometry_cylinders: Option<u32>,
+    ddb_geometry_cylinders: Option<u64>,
     /// The number of heads
-    ddb_geometry_heads: Option<u32>,
+    ddb_geometry_heads: Option<u64>,
     /// The number of sectors
-    ddb_geometry_sectors: Option<u32>,
+    ddb_geometry_sectors: Option<u64>,
     /// The number of cylinders as reported by the BIOS
-    ddb_geometry_bios_cylinders: Option<u32>,
+    ddb_geometry_bios_cylinders: Option<u64>,
     /// The number of heads as reported by the BIOS
-    ddb_geometry_bios_heads: Option<u32>,
+    ddb_geometry_bios_heads: Option<u64>,
     /// The number of sectors as reported by the BIOS
-    ddb_geometry_bios_sectors: Option<u32>,
+    ddb_geometry_bios_sectors: Option<u64>,
     /// The disk adapter type
     ddb_adapter_type: Option<VMDKDiskAdapterType>,
     /// String containing the version of the installed VMWare tools
@@ -272,6 +277,7 @@ impl TryFrom<HashMap<String, String>> for VMDKDiskDatabase {
 /// Represents a VMDK descriptor file.
 /// 
 /// As defined at: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#2-the-descriptor-file
+#[derive(Clone)]
 struct VMDKDescriptorFile {
     /// The VMDK header read from the descriptor file.
     header: VMDKHeader,
@@ -389,7 +395,7 @@ impl FromStr for VMDKDescriptorFile {
 /// Represents a VMDK disk type.
 /// 
 /// As defined at: https://github.com/libyal/libvmdk/blame/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#212-disk-type
-#[derive(Debug, EnumString, PartialEq)]
+#[derive(Debug, EnumString, PartialEq, Clone)]
 #[strum(serialize_all = "camelCase")]
 enum VMDKDiskType {
     /// The disk is split into fixed-size extents of maximum 2 GB.
@@ -463,12 +469,76 @@ enum VMDKDiskType {
     VmfsThin,
 }
 
+/// Reads data from a RAW type extent
+/// 
+/// This type of extent consists in a RAW data file and is the simplest to read from as it does not require any special handling and can be read byte by byte.
+/// 
+/// This function takes a handle to the RAW file we want to read from and the offset from which to start reading.
+/// The data read from the RAW file is then stored in the provided buffer. An `io::Result<usize>` is returned indicating the number of bytes read.
+fn read_raw_extent(file: &mut File, buf: &mut [u8], start_offset: u64) -> io::Result<usize> {
+    file.seek(io::SeekFrom::Start(start_offset))?;
+    file.read(buf)
+}
+
+/// Stores a VMDK extent file handle and the associated extent information for reading actual data.
+struct VMDKExtentFile {
+    /// The extent description for this file
+    extent_description: VMDKExtentDescriptor,
+    /// The file handle for the extent file
+    file: Result<File, io::Error>,
+}
+
+impl Clone for VMDKExtentFile {
+    fn clone(&self) -> Self {
+        let file = if self.file.is_ok() {
+            self.file.as_ref().unwrap().try_clone()
+        } else {
+            let err = self.file.as_ref().err().unwrap();
+            Err(io::Error::new(err.kind(), "Failed to clone file handle"))
+        };
+        Self { 
+            extent_description: self.extent_description.clone(), 
+            file
+        }
+    }
+}
+
+impl VMDKExtentFile {
+    /// Reads data in the range specified by the start and end positions (relative to the first sector defined for the extent file) and stores the data into the provided buffer.
+    /// 
+    /// This function returns the actual data stored in the extent file after any parsing or decrompression if necessary.
+    /// 
+    /// # Errors
+    /// 
+    /// Errors if any IO error occurs while reading or if the provided range exceeds the extent file's limits.
+    fn read_data(&mut self, start_pos: u64, end_pos: u64, buf: &mut [u8]) -> io::Result<usize> {
+        match self.extent_description.extent_type {
+            VMDKExtentType::Flat => {
+                read_raw_extent(self.file.as_mut().map_err(|e| io::Error::new(e.kind(), "Error while opening file"))?, buf, start_pos)
+            },
+            VMDKExtentType::Sparse => todo!(),
+            VMDKExtentType::Zero => {
+                // Zero out the buffer
+                buf.fill(0);
+                Ok(buf.len())
+            },
+            VMDKExtentType::Vmfs => todo!(),
+            VMDKExtentType::VmfsSparse => todo!(),
+            VMDKExtentType::VmfsRdm => todo!(),
+            VMDKExtentType::VmfsRaw => todo!(),
+        }
+    }
+}
+
 /// Represents a VMDK virtual disk.
+#[derive(Clone)]
 pub struct VMDK {
     /// The descriptor file for the volume
     descriptor_file: VMDKDescriptorFile,
     /// List of the extent files for the volume
-    extent_files: Vec<File>,
+    extent_files: Vec<VMDKExtentFile>,
+    /// The position of the cursor on the disk
+    position: u64,
 }
 
 impl VMDK {
@@ -480,42 +550,67 @@ impl VMDK {
     /// Throws an error if the file at the given path is not a valid VMDK descriptor file or if the specified extent files cannot be opened.
     /// May also throw an error if the encountered extend files are of unrecognized types.
     pub fn new(file_path: &str) -> Result<VMDK, String> {
-        // Open the descriptor file and retrieve string contents
-        let descriptor_file_contents = fs::read_to_string(file_path)
-           .map_err(|e| format!("Error reading descriptor file: {}", e))?;
+        debug!("Opening and reading VMDK descriptor file: {}", file_path);
+
+        // First, identify if we have a monolithic VMDK
+        let mut vmdk_file = File::open(file_path).map_err(|e| format!("Error reading descriptor file: {}", e))?;
+        let mut magic_buffer = [0u8; 4];
+        let descriptor_file_contents = if vmdk_file.read(&mut magic_buffer).map_err(|e| format!("Error reading descriptor file: {}", e))? == 4
+            && &magic_buffer[..] == b"KDMV" {
+            debug!("Monolithic VMDK detected, extracting descriptor information");
+            error!("Not implemented yet!");
+            todo!();
+            String::new()
+        } else {
+            debug!("Trying to decode standalone descriptor file");
+            fs::read_to_string(file_path)
+                .map_err(|e| format!("Error reading descriptor file: {}", e))?
+        };
 
         // Parse the descriptor file into a VMDKDescriptorFile object
         let descriptor_file: VMDKDescriptorFile = descriptor_file_contents.parse()
            .map_err(|e| format!("Error parsing descriptor file: {}", e))?;
         
+        debug!("Opening VMDK extent files if any");
         // Try to open all the identified extent files and add them to the VMDK object
-        let mut extent_files_iter = descriptor_file.extent_descriptions
+        let extent_files: Vec<VMDKExtentFile> = descriptor_file.extent_descriptions
             .iter()
             .filter_map(|extent| {
                 if let Some(ref extent_file_name) = extent.extent_file_name {
-                    Some(File::open(extent_file_name)
-                    .map_err(|e| format!("Error opening extent file {}: {}", extent_file_name, e)))
+                    // Ensure the path read in the descriptor file is treated as a path relative to the descriptor file
+                    // Note: the specification of VMDK does not prohibit absolute paths in the extent file name but this case is considered as 
+                    // unlikely and impractical in a forensic context. This code may be corrected if the case happens in the real world.
+                    let extent_file_path = Path::new(file_path).parent().unwrap_or(Path::new("")).join(extent_file_name);
+                    let file = File::open(extent_file_path);
+                    Some(VMDKExtentFile { 
+                        extent_description: extent.clone(), 
+                        file
+                    })
                 } else {
                     None
                 }
-            });
+            })
+            .collect();
         
-        if extent_files_iter.any(|e| e.is_err()) {
-            let mut err = String::from("Error opening one or more extent files:");
-            for err_msg in extent_files_iter.filter_map(|e| e.err()) {
-                err.push_str(&format!("\n- {}", err_msg));
+        let mut extent_files_iter = extent_files.iter();
+
+        if extent_files_iter.any(|e| e.file.is_err()) {
+            extent_files_iter = extent_files.iter();
+            error!("Error opening one or more extent files:");
+            for e in extent_files_iter.filter(|e| e.file.is_err()) {
+                error!("- {} for {}", e.file.as_ref().err().unwrap(), e.extent_description.extent_file_name.as_ref().unwrap_or(&String::from("no name")));
             }
-            return Err(err);
+            return Err(String::from("Error opening one or more extent files"));
         } else {
-            // Unwrapping should be safe here as we eliminated None values and checked that no error occurred while opening extent files
-            let extent_files = extent_files_iter.map(|f| f.unwrap()).collect();
             return Ok(VMDK {
                 descriptor_file,
                 extent_files,
+                position: 0,
             });
         }
     }
 
+    /// Reads data from the VMDK descriptor and prints metadata to the console.
     pub fn print_info(&self) {
         info!("VMDK Disk Information:");
 
@@ -532,6 +627,7 @@ impl VMDK {
         info!("  Disk ID: {:x}", self.descriptor_file.header.cid);
         if let Some(ref disk_database) = self.descriptor_file.disk_database {
             if let Some(sectors) = disk_database.ddb_geometry_sectors {
+                // Maybe we shouldn't rely on this information and rather use the number of sectors from the extent descriptions
                 info!("  Disk Size: {} sectors", sectors);
                 info!("  Disk Size: {} bytes", sectors * SECTOR_SIZE);
             }
@@ -544,8 +640,123 @@ impl VMDK {
         }
     }
 
-    pub fn get_sector_size(&self) -> u32 {
+    /// Reads data from the VMDK disk into the given buffer, starting from the current position.
+    /// Advances the current position by the number of bytes read and returns the number of bytes read.
+    pub fn vmdk_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // First, identify the extent file(s) that contains the data at the desired position
+        let buf_len = buf.len() as u64;
+        let mut extent_files = self.extent_files.iter_mut()
+            .filter(|e| {
+                (
+                    // We want the file that contains the starting position
+                    self.position >= e.extent_description.extent_start_sector.unwrap_or(0) * SECTOR_SIZE &&
+                    self.position < (e.extent_description.extent_start_sector.unwrap_or(0) + e.extent_description.sector_number) * SECTOR_SIZE
+                ) ||
+                (
+                    // We also want the file that contains the ending position (starting position + length of the buffer)
+                    self.position + buf_len >= e.extent_description.extent_start_sector.unwrap_or(0) * SECTOR_SIZE &&
+                    self.position + buf_len < (e.extent_description.extent_start_sector.unwrap_or(0) + e.extent_description.sector_number) * SECTOR_SIZE
+                ) ||
+                (
+                    // And we want all the files in between
+                    self.position < e.extent_description.extent_start_sector.unwrap_or(0) * SECTOR_SIZE &&
+                    self.position + buf_len > (e.extent_description.extent_start_sector.unwrap_or(0) + e.extent_description.sector_number) * SECTOR_SIZE
+                )
+            });
+        
+        let mut total_read = 0;
+        while let Some(extent) = extent_files.next() {
+            // Find the relative position within the extent file we want depending on the structure of the extent files we recovered
+            let end_of_extent = (extent.extent_description.extent_start_sector.unwrap_or(0) + extent.extent_description.sector_number) * SECTOR_SIZE;
+            let start_of_extent = extent.extent_description.extent_start_sector.unwrap_or(0) * SECTOR_SIZE;
+            let start_position = 
+                if self.position >= start_of_extent {
+                        self.position - start_of_extent
+                } else {
+                    0
+                };
+            let end_position =
+                if self.position + (buf.len() as u64) >= end_of_extent {
+                    end_of_extent - start_of_extent
+                } else {
+                    self.position + (buf.len() as u64) - start_of_extent
+                };
+            // Now, read the data from the extent file and update the buffer
+            let buffer_start = 
+                if start_of_extent <= self.position {
+                    0
+                } else {
+                    start_of_extent - self.position
+                }
+                ;
+            let buffer_end = (buffer_start + end_position - start_position) as usize;
+            let buf_part = &mut buf[0..buffer_end];
+            let read_result = extent.read_data(start_position, end_position, buf_part);
+            if let Ok(read_bytes) = read_result {
+                total_read += read_bytes;
+            } else {
+                return read_result;
+            }
+        }
+        self.position = self.position + total_read as u64;
+        Ok(total_read)
+    }
+
+    /// Adds the given offset to the current position in the VMDK disk.
+    /// Next call to `vmdk_read` will read from the updated position.
+    pub fn vmdk_seek(&mut self, offset: SeekFrom) -> io::Result<u64> {
+        // First, check that the desired position is within the bounds of the disk as defined by the extent descriptions
+        // If we are in the bounds, update the current position and return the new position
+        if !self.descriptor_file.extent_descriptions.is_empty() {
+            let total_sectors: u64 = self.descriptor_file.extent_descriptions.iter().map(|e| e.sector_number).sum();
+            let total_bytes = total_sectors * SECTOR_SIZE;
+            match offset {
+                SeekFrom::Start(offset) => {
+                    if offset <= total_bytes {
+                        self.position = offset;
+                        return Ok(offset);
+                    } else {
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Offset is out of bounds"));
+                    }
+                },
+                SeekFrom::Current(offset) => {
+                    let new_position = self.position.checked_add_signed(offset);
+                    if new_position.is_some() && new_position.unwrap_or(u64::MAX) <= total_bytes {
+                        self.position = new_position.unwrap_or(0);
+                        return Ok(self.position);
+                    } else {
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Offset is out of bounds"));
+                    }
+                },
+                SeekFrom::End(offset) => {
+                    let new_position = total_bytes.checked_add_signed(offset);
+                    if new_position.is_some() && new_position.unwrap_or(u64::MAX) <= total_bytes {
+                        self.position = new_position.unwrap_or(0);
+                        return Ok(self.position);
+                    } else {
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Offset is out of bounds"));
+                    }
+                },
+            }
+        } else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "No extent descriptions found"));
+        }
+    }
+
+    pub fn get_sector_size(&self) -> u64 {
         SECTOR_SIZE
+    }
+}
+
+impl Read for VMDK {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.vmdk_read(buf)
+    }
+}
+
+impl Seek for VMDK {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.vmdk_seek(pos)
     }
 }
 
