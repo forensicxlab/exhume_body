@@ -409,6 +409,9 @@ enum VMDKDiskType {
     /// TODO: Implement parsing for the 2 possible names
     #[strum(serialize = "2GbMaxExtentFlat")]
     TwoGbMaxExtentFlat,
+    /// Same as TwoGbMaxExtentFlat, this exists to take into account the 2 possible names
+    #[strum(serialize = "twoGbMaxExtentFlat")]
+    TwoGbMaxExtentFlatAlt,
     /// The disk is split into sparse (dynamic-size) extents of maximum 2 GB.
     /// The extents consists of VMDK sparse extent data files.
     /// 
@@ -417,6 +420,9 @@ enum VMDKDiskType {
     /// * VMDK sparse data extent files (<name>-s.vmdk), where is contains a decimal value starting with 1.
     #[strum(serialize = "2GbMaxExtentSparse")]
     TwoGbMaxExtentSparse,
+    /// Same as TwoGbMaxExtentSparse, this exists to take into account the 2 possible names
+    #[strum(serialize = "twoGbMaxExtentSparse")]
+    TwoGbMaxExtentSparseAlt,
     /// Descriptor file with arbitrary extents , used to mount v2i-format.
     Custom,
     /// The disk uses a full physical disk device.
