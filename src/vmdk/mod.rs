@@ -4,10 +4,8 @@
 //! 
 //! For the moment VMDK descriptor files not written in UTF-8 encoding are not supported.
 
-use core::num;
 use std::{cmp::min, collections::HashMap, fs::{self, File}, io::{self, Read, Seek, SeekFrom}, path::Path, str::FromStr, sync::LazyLock, u64};
 
-use flate2::read;
 use log::{debug, error, info};
 use regex::Regex;
 use strum::EnumString;
@@ -17,6 +15,13 @@ const DESCRIPTOR_FILE_SIGNATURE: &'static str = "# Disk DescriptorFile";
 const DESCRIPTOR_FILE_EXTENT_SECTION_SIGNATURE: &'static str = "# Extent description";
 const DESCRIPTOR_FILE_CHANGE_TRACKING_SECTION_SIGNATURE: &'static str  = "# Change Tracking File";
 const DESCRIPTOR_FILE_DISK_DATABASE_SECTION_SIGNATURE: &'static str = "# The Disk Data Base";
+
+// Flags used in sparse extent file headers.
+const _FLAG_VALID_NEWLINE_DETECTION_TEST: u32 = 0x00000001;
+const FLAG_USE_SECONDARY_GRAIN_DIRECTORY: u32 = 0x00000002;
+const FLAG_USE_ZEROED_GRAIN_TABLE: u32 = 0x00000004;
+const FLAG_HAS_COMPRESSED_GRAIN_DATA: u32 = 0x00010000;
+const FLAG_HAS_METADATA: u32 = 0x00020000;
 
 /// Represents the character encoding used for the descriptor file.
 /// 
@@ -500,7 +505,13 @@ impl VMDKSparseExtentMetadata {
         }
         debug!("Grain directory entry count: {}", grain_directory_entry_count);
         let mut grain_directory = Vec::with_capacity(grain_directory_entry_count as usize);
-        file.seek(io::SeekFrom::Start(u64::try_from(header.grain_directory_sector).unwrap() * SECTOR_SIZE))
+        let active_grain_directory_sector = 
+        if header.flags & FLAG_USE_SECONDARY_GRAIN_DIRECTORY == FLAG_USE_SECONDARY_GRAIN_DIRECTORY || header.grain_directory_sector == -1 { 
+            header.grain_directory_sector 
+        } else {
+            i64::try_from(header.secondary_grain_directory_sector).unwrap()
+        };
+        file.seek(io::SeekFrom::Start(u64::try_from(active_grain_directory_sector).unwrap() * SECTOR_SIZE))
             .map_err(|e| format!("Unable to navigate the sparse extent file: {}", e))?;
         for _ in 0..grain_directory_entry_count {
             let mut number_buf = [0u8; 4];
