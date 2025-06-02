@@ -4,8 +4,10 @@
 //! 
 //! For the moment VMDK descriptor files not written in UTF-8 encoding are not supported.
 
-use std::{collections::HashMap, fs::{self, File}, io::{self, Read, Seek, SeekFrom}, path::Path, str::FromStr, sync::LazyLock, u64};
+use core::num;
+use std::{cmp::min, collections::HashMap, fs::{self, File}, io::{self, Read, Seek, SeekFrom}, path::Path, str::FromStr, sync::LazyLock, u64};
 
+use flate2::read;
 use log::{debug, error, info};
 use regex::Regex;
 use strum::EnumString;
@@ -42,7 +44,7 @@ enum VMDKEncoding {
 }
 
 /// Represents a VMDK header section in a VMDK descriptor file.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VMDKHeader {
     /// The VMDK version number, must be 1, 2 or 3.
     version: u8,
@@ -134,7 +136,7 @@ enum VMDKExtentType {
 }
 
 /// The extent descriptor allows to locate data within the extent files of the virtual disk.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VMDKExtentDescriptor {
     /// Access mode for the extent
     access_mode: VMDKExtentAccessMode,
@@ -183,7 +185,7 @@ impl FromStr for VMDKExtentDescriptor {
 }
 
 /// The change tracking file section was introduced in version 3 and seems to allow definition of a file log of changes made to the virtual disk.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VMDKChangeTrackingSection {
     /// Path of the change tracking file.
     change_track_path: String,
@@ -202,7 +204,7 @@ enum VMDKDiskAdapterType {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VMDKDiskDatabase {
     /// Most encountered value is true
     ddb_deletable: Option<bool>,
@@ -277,7 +279,7 @@ impl TryFrom<HashMap<String, String>> for VMDKDiskDatabase {
 /// Represents a VMDK descriptor file.
 /// 
 /// As defined at: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#2-the-descriptor-file
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct VMDKDescriptorFile {
     /// The VMDK header read from the descriptor file.
     header: VMDKHeader,
@@ -404,6 +406,7 @@ enum VMDKDiskType {
     /// The 2GbMaxExtentFlat (or twoGbMaxExtentFlat) disk image consists of:
     /// * a descriptor file
     /// * RAW data extent files (<name>-f.vmdk), where is contains a decimal value starting with 1.
+    /// TODO: Implement parsing for the 2 possible names
     #[strum(serialize = "2GbMaxExtentFlat")]
     TwoGbMaxExtentFlat,
     /// The disk is split into sparse (dynamic-size) extents of maximum 2 GB.
@@ -469,6 +472,56 @@ enum VMDKDiskType {
     VmfsThin,
 }
 
+#[derive(Clone, Debug)]
+struct VMDKSparseExtentMetadata {
+    /// The header of the sparse extent file
+    header: VMDKSparseFileHeader,
+    /// The grain directory
+    grain_directory: Vec<u32>,
+}
+
+impl VMDKSparseExtentMetadata {
+    /// Takes a sparse extent file and reads its metadata to recover the grain directory and grain tables
+    fn read_from_file(file: &mut File, header: &VMDKSparseFileHeader) -> Result<Self, String> {
+        if header.grain_directory_sector < 0 {
+            // TODO: Handle COWD sparse extents
+            return Err("Primary Grain directory not specified, probably a COWD sparse extent, which is not supported yet".to_string());
+        }
+        let mut grain_directory_entry_count: u64 = header.capacity / (header.number_of_grain_table_entries as u64 * header.grain_number);
+        if header.capacity % ( header.number_of_grain_table_entries as u64 * header.grain_number ) > 0
+        {
+            grain_directory_entry_count += 1
+        }
+        debug!("Grain directory entry count: {}", grain_directory_entry_count);
+        let mut grain_directory = Vec::with_capacity(grain_directory_entry_count as usize);
+        file.seek(io::SeekFrom::Start(u64::try_from(header.grain_directory_sector).unwrap() * SECTOR_SIZE))
+            .map_err(|e| format!("Unable to navigate the sparse extent file: {}", e))?;
+        for _ in 0..grain_directory_entry_count {
+            let mut number_buf = [0u8; 4];
+            file.read(&mut number_buf)
+                .map_err(|e| format!("Error reading sparse extent file: {}", e))?;
+            grain_directory.push(u32::from_le_bytes(number_buf));
+        }
+        let mut grain_table_entries = Vec::with_capacity(header.number_of_grain_table_entries as usize * grain_directory_entry_count as usize);
+        for entry in grain_directory {
+            file.seek(SeekFrom::Start(u64::from(entry) * SECTOR_SIZE))
+                .map_err(|e| format!("Unable to navigate the sparse extent file: {}", e))?;
+            for _ in 0..header.number_of_grain_table_entries {
+                let mut grain_buf = [0u8; 4];
+                file.read(&mut grain_buf)
+                   .map_err(|e| format!("Error reading sparse extent file: {}", e))?;
+                grain_table_entries.push(u32::from_le_bytes(grain_buf));
+            }
+            debug!("Grain table entry: {:?}", grain_table_entries);
+            break;
+        }
+        Ok(VMDKSparseExtentMetadata {
+            header: header.clone(),
+            grain_directory: grain_table_entries,
+        })
+    }
+}
+
 /// Reads data from a RAW type extent
 /// 
 /// This type of extent consists in a RAW data file and is the simplest to read from as it does not require any special handling and can be read byte by byte.
@@ -480,12 +533,63 @@ fn read_raw_extent(file: &mut File, buf: &mut [u8], start_offset: u64) -> io::Re
     file.read(buf)
 }
 
+/// Read data from a sparse extent
+/// 
+/// This type of extent contains data in grains. A grain regroup several sectors, usually 128 (for 64kB of data).
+/// 
+/// This function takes a handle to the sparse file we want to read from and the offset in a similar way that `read_raw_extend` does.
+/// To do so, the sparse file is "flattened" to fill the buffer in a linear manner (as the sparse file stores data in a non-linear way).
+/// An `io::Result<usize>` is returned indicating the number of bytes read.
+fn read_sparse_extent(file: &mut File, buf: &mut [u8], start_offset: u64, sparse_metadata: &VMDKSparseExtentMetadata) -> io::Result<usize> {
+    let grain_size_in_bytes = sparse_metadata.header.grain_number * SECTOR_SIZE;
+    let first_grain = start_offset / grain_size_in_bytes;
+    let last_grain = (start_offset + buf.len() as u64).div_ceil(grain_size_in_bytes);
+    let grain_range = first_grain..last_grain;
+    debug!("Grain range: {:?}", grain_range);
+    let mut read_size = 0;
+    for grain in grain_range {
+        let sector_number = *sparse_metadata.grain_directory.get(grain as usize).ok_or(io::Error::new(io::ErrorKind::Other, "Grain directory entry not found"))?;
+        if sector_number == 0 {
+            // The grain is sparse
+            let remaining_buffer_size = buf.len() - read_size;
+            if grain == first_grain {
+                let additional_offset = start_offset - (grain * grain_size_in_bytes);
+                let upper_bound = min((grain_size_in_bytes - additional_offset) as usize, remaining_buffer_size);
+                buf[read_size..read_size + upper_bound].fill(0);
+                read_size += remaining_buffer_size;
+            } else {
+                let remaining_read = min(remaining_buffer_size,grain_size_in_bytes as usize);
+                debug!("Remaining read: {}", remaining_read);
+                buf[read_size..read_size + remaining_read].fill(0);
+                read_size += remaining_read;
+            }
+        } else {
+            // The grain is not sparse, read the data from the file
+            file.seek(io::SeekFrom::Start(sector_number as u64 * SECTOR_SIZE))?;
+            let remaining_buffer_size = buf.len() - read_size;
+            let mut upper_bound = min(remaining_buffer_size,grain_size_in_bytes as usize);
+            if grain == first_grain {
+                let additional_offset = start_offset - (grain * grain_size_in_bytes);
+                // Panic shouldn't occur as it is highly unlikely that the additional offset exceeds the i64 bounds
+                file.seek(io::SeekFrom::Current(additional_offset.try_into().unwrap()))?;
+                if additional_offset + upper_bound as u64 > grain_size_in_bytes {
+                    upper_bound = (grain_size_in_bytes - additional_offset) as usize;
+                }
+            }
+            read_size += file.read(&mut buf[read_size..read_size + upper_bound])?;
+        }
+    }
+    Ok(read_size)
+}
+
 /// Stores a VMDK extent file handle and the associated extent information for reading actual data.
 struct VMDKExtentFile {
     /// The extent description for this file
     extent_description: VMDKExtentDescriptor,
     /// The file handle for the extent file
     file: Result<File, io::Error>,
+    /// Metadata for sparse extent files, Some if this is a sparse extent file
+    sparse_extent_metadata: Option<VMDKSparseExtentMetadata>,
 }
 
 impl Clone for VMDKExtentFile {
@@ -498,7 +602,8 @@ impl Clone for VMDKExtentFile {
         };
         Self { 
             extent_description: self.extent_description.clone(), 
-            file
+            file,
+            sparse_extent_metadata: self.sparse_extent_metadata.clone(),
         }
     }
 }
@@ -516,18 +621,118 @@ impl VMDKExtentFile {
             VMDKExtentType::Flat => {
                 read_raw_extent(self.file.as_mut().map_err(|e| io::Error::new(e.kind(), "Error while opening file"))?, buf, start_pos)
             },
-            VMDKExtentType::Sparse => todo!(),
+            VMDKExtentType::Sparse => {
+                read_sparse_extent(
+                    self.file.as_mut().map_err(|e| io::Error::new(e.kind(), 
+                    "Error while opening file"))?, 
+                    buf, 
+                    start_pos,
+                    self.sparse_extent_metadata.as_ref().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "No sparse extent metadata available"))?
+                )
+            },
             VMDKExtentType::Zero => {
                 // Zero out the buffer
                 buf.fill(0);
                 Ok(buf.len())
             },
-            VMDKExtentType::Vmfs => todo!(),
+            VMDKExtentType::Vmfs => {
+                read_raw_extent(self.file.as_mut().map_err(|e| io::Error::new(e.kind(), "Error while opening file"))?, buf, start_pos)
+            },
             VMDKExtentType::VmfsSparse => todo!(),
             VMDKExtentType::VmfsRdm => todo!(),
             VMDKExtentType::VmfsRaw => todo!(),
         }
     }
+}
+
+/// Compression method used for data stored in VMDK sparse files
+#[derive(Debug, Clone)]
+enum VMDKCompressionMethod {
+    None,
+    Deflate,
+}
+
+/// Structure representing a sparse file including its header and metadata.
+#[derive(Clone, Debug)]
+struct VMDKSparseFileHeader {
+    /// Version of the VMDK Sparse format
+    pub version: u32,
+    /// Flags
+    pub flags: u32,
+    /// Maximum data number of sectors
+    pub capacity: u64,
+    /// Grain number of sectors
+    /// The value must be a power of 2 and > 8
+    pub grain_number: u64,
+    /// The sector number of the embedded descriptor file. The value is relative from the start of the file or 0 if not set.
+    pub embedded_descriptor_sector: u64,
+    /// Descriptor number of sectors
+    /// The number of sectors of the embedded descriptor in the extent data file.
+    pub embedded_descriptor_sectors_count: u64,
+    /// The number of grain table entries
+    pub number_of_grain_table_entries: u32,
+    /// Secondary (redundant) grain directory sector number
+    /// The value is relative from the start of the file or 0 if not set.
+    pub secondary_grain_directory_sector: u64,
+    /// Grain directory sector number
+    /// The value is relative from the start of the file or 0 if not set. This value can be -1
+    pub grain_directory_sector: i64,
+    /// Metadata (overhead) number of sectors
+    pub number_of_sectors: u64,
+    /// Is dirty
+    /// Value to determine if the extent data file was cleanly closed.
+    pub is_dirty: bool,
+    /// Compression method
+    pub compression_method: VMDKCompressionMethod,
+}
+
+impl VMDKSparseFileHeader {
+    /// Parses a data buffer and tries to create a new VMDKSparseFileHeader object from the provided data buffer.
+    fn parse_sparse_header(header_data: &[u8]) -> Result<Self, String> {
+        if header_data.len() < 80 {
+            return Err("Header data too short".to_string());
+        }
+        if &header_data[0..4] != b"KDMV" {
+            return Err("Invalid VMDK magic number".to_string());
+        }
+        let compression_method = match u16::from_le_bytes(<[u8; 2]>::try_from(&header_data[77..79]).unwrap()) {
+            0 => VMDKCompressionMethod::None,
+            1 => VMDKCompressionMethod::Deflate,
+            _ => return Err("Unsupported compression method".to_string()),
+        };
+        return Ok(Self {
+            version: u32::from_le_bytes(<[u8; 4]>::try_from(&header_data[4..8]).unwrap()),
+            flags: u32::from_le_bytes(<[u8; 4]>::try_from(&header_data[8..12]).unwrap()),
+            capacity: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[12..20]).unwrap()),
+            grain_number: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[20..28]).unwrap()),
+            embedded_descriptor_sector: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[28..36]).unwrap()),
+            embedded_descriptor_sectors_count: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[36..44]).unwrap()),
+            number_of_grain_table_entries: u32::from_le_bytes(<[u8; 4]>::try_from(&header_data[44..48]).unwrap()),
+            secondary_grain_directory_sector: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[48..56]).unwrap()),
+            grain_directory_sector: i64::from_le_bytes(<[u8; 8]>::try_from(&header_data[56..64]).unwrap()),
+            number_of_sectors: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[64..72]).unwrap()),
+            is_dirty: header_data[72] & 0x01 == 1,
+            compression_method,
+        })
+    }
+}
+
+/// Returns a VMDKDescriptorFile object from the provided sparse file and metadata.
+/// 
+/// # Errors
+/// 
+/// Errors on file read errors and if there is no embedded descriptor in the file.
+fn get_descriptor_from_sparse(file: &mut File, header: &VMDKSparseFileHeader) -> Result<VMDKDescriptorFile, String> {
+    if header.embedded_descriptor_sector == 0 || header.embedded_descriptor_sectors_count == 0 {
+        return Err("No embedded descriptor file found".to_string());
+    }
+    let mut descriptor_buffer = vec![0u8; header.embedded_descriptor_sectors_count as usize * SECTOR_SIZE as usize];
+    file.seek(io::SeekFrom::Start(header.embedded_descriptor_sector * SECTOR_SIZE as u64))
+        .and_then(|_| file.read_exact(&mut descriptor_buffer))
+        .map_err(|e| format!("Error reading embedded descriptor file: {}", e))?;
+    let descriptor_string = String::from_utf8_lossy(&descriptor_buffer);
+    let descriptor: VMDKDescriptorFile = descriptor_string.parse()?;
+    return Ok(descriptor);
 }
 
 /// Represents a VMDK virtual disk.
@@ -555,21 +760,27 @@ impl VMDK {
         // First, identify if we have a monolithic VMDK
         let mut vmdk_file = File::open(file_path).map_err(|e| format!("Error reading descriptor file: {}", e))?;
         let mut magic_buffer = [0u8; 4];
-        let descriptor_file_contents = if vmdk_file.read(&mut magic_buffer).map_err(|e| format!("Error reading descriptor file: {}", e))? == 4
+        let mut sparse_header = None;
+        let descriptor_file = if vmdk_file.read(&mut magic_buffer).map_err(|e| format!("Error reading descriptor file: {}", e))? == 4
             && &magic_buffer[..] == b"KDMV" {
-            debug!("Monolithic VMDK detected, extracting descriptor information");
-            error!("Not implemented yet!");
-            todo!();
-            String::new()
+            debug!("Monolithic Sparse VMDK detected, extracting descriptor information");
+            vmdk_file.seek(SeekFrom::Start(0)).map_err(|e| format!("Error reading descriptor file: {}", e))?;
+            let mut header_data = [0u8; 80];
+            sparse_header = match vmdk_file.read(&mut header_data) {
+                Ok(_) => Some(VMDKSparseFileHeader::parse_sparse_header(&header_data)?),
+                Err(e) => return Err(format!("Error reading header in sparse file: {}", e)),
+            };
+            let descriptor = get_descriptor_from_sparse(&mut vmdk_file, sparse_header.as_ref().unwrap())?;
+            descriptor
         } else {
             debug!("Trying to decode standalone descriptor file");
-            fs::read_to_string(file_path)
-                .map_err(|e| format!("Error reading descriptor file: {}", e))?
+            let descriptor_file_contents = fs::read_to_string(file_path)
+                .map_err(|e| format!("Error reading descriptor file: {}", e))?;
+            let descriptor_file: VMDKDescriptorFile = descriptor_file_contents.parse()
+                .map_err(|e| format!("Error parsing descriptor file: {}", e))?;
+            descriptor_file
         };
-
-        // Parse the descriptor file into a VMDKDescriptorFile object
-        let descriptor_file: VMDKDescriptorFile = descriptor_file_contents.parse()
-           .map_err(|e| format!("Error parsing descriptor file: {}", e))?;
+        debug!("Parsed descriptor: {:?}", descriptor_file);
         
         debug!("Opening VMDK extent files if any");
         // Try to open all the identified extent files and add them to the VMDK object
@@ -581,10 +792,29 @@ impl VMDK {
                     // Note: the specification of VMDK does not prohibit absolute paths in the extent file name but this case is considered as 
                     // unlikely and impractical in a forensic context. This code may be corrected if the case happens in the real world.
                     let extent_file_path = Path::new(file_path).parent().unwrap_or(Path::new("")).join(extent_file_name);
-                    let file = File::open(extent_file_path);
+                    debug!("Opening extent file: {}", extent_file_path.display());
+                    let mut file = File::open(extent_file_path).ok()?;
+                    let sparse_extent_metadata = if extent.extent_type == VMDKExtentType::Sparse {
+                        if sparse_header.is_none() {
+                            file.seek(SeekFrom::Start(0)).ok()?;
+                            let mut header_data = [0u8; 80];
+                            sparse_header = match file.read(&mut header_data) {
+                                Ok(_) => Some(VMDKSparseFileHeader::parse_sparse_header(&header_data).ok()?),
+                                Err(_) => return None,
+                            };
+                        }
+                        debug!("Parsed header: {:?}", sparse_header);
+                        VMDKSparseExtentMetadata::read_from_file(
+                            &mut file,
+                            sparse_header.as_ref()?
+                        ).ok()
+                    } else {
+                        None
+                    };
                     Some(VMDKExtentFile { 
                         extent_description: extent.clone(), 
-                        file
+                        file: Ok(file),
+                        sparse_extent_metadata,
                     })
                 } else {
                     None
