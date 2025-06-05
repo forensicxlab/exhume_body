@@ -1,11 +1,15 @@
 //! This module contains functionality for reading VMDK volumes.
 //! 
+//! Currently VMDK files using Flat and Sparse (compressed of not) extents are supported. COWD files (used on ESXi) are not at this stage.
+//! Note that this module does not support reading snapshots and any VMDK disk that requires referring to a parent VMDK.
+//! 
 //! # Known Limitations
 //! 
 //! For the moment VMDK descriptor files not written in UTF-8 encoding are not supported.
 
-use std::{cmp::min, collections::HashMap, fs::{self, File}, io::{self, Read, Seek, SeekFrom}, path::Path, str::FromStr, sync::LazyLock, u64};
+use std::{cmp::min, collections::HashMap, ffi::OsStr, fs::{self, File}, io::{self, BufReader, Read, Seek, SeekFrom}, path::Path, str::FromStr, sync::LazyLock, u64};
 
+use flate2::bufread::ZlibDecoder;
 use log::{debug, error, info};
 use regex::Regex;
 use strum::EnumString;
@@ -19,9 +23,9 @@ const DESCRIPTOR_FILE_DISK_DATABASE_SECTION_SIGNATURE: &'static str = "# The Dis
 // Flags used in sparse extent file headers.
 const _FLAG_VALID_NEWLINE_DETECTION_TEST: u32 = 0x00000001;
 const FLAG_USE_SECONDARY_GRAIN_DIRECTORY: u32 = 0x00000002;
-const FLAG_USE_ZEROED_GRAIN_TABLE: u32 = 0x00000004;
+const _FLAG_USE_ZEROED_GRAIN_TABLE: u32 = 0x00000004;
 const FLAG_HAS_COMPRESSED_GRAIN_DATA: u32 = 0x00010000;
-const FLAG_HAS_METADATA: u32 = 0x00020000;
+const _FLAG_HAS_METADATA: u32 = 0x00020000;
 
 /// Represents the character encoding used for the descriptor file.
 /// 
@@ -80,7 +84,7 @@ impl TryFrom<HashMap<String, String>> for VMDKHeader {
             .ok_or("version not found in header")?.parse()
             .map_err(|_| "invalid version in header")?;
         let encoding = value.get("encoding")
-            .ok_or("encoding not found in header")?.parse()
+            .unwrap_or(&String::from("UTF-8")).parse()
             .map_err(|_| "invalid encoding in header")?;
         let cid = u32::from_str_radix(
             value.get("CID").ok_or("CID not found in header")?.as_str(),
@@ -157,6 +161,12 @@ struct VMDKExtentDescriptor {
     partition_uuid: Option<String>,
     /// Only specified in some cases regarding Windows systems
     device_identifier: Option<String>,
+}
+
+impl VMDKExtentDescriptor {
+    fn set_path(&mut self, path: &str) -> () {
+        self.extent_file_name = Some(path.to_string());
+    }
 }
 
 
@@ -411,7 +421,6 @@ enum VMDKDiskType {
     /// The 2GbMaxExtentFlat (or twoGbMaxExtentFlat) disk image consists of:
     /// * a descriptor file
     /// * RAW data extent files (<name>-f.vmdk), where is contains a decimal value starting with 1.
-    /// TODO: Implement parsing for the 2 possible names
     #[strum(serialize = "2GbMaxExtentFlat")]
     TwoGbMaxExtentFlat,
     /// Same as TwoGbMaxExtentFlat, this exists to take into account the 2 possible names
@@ -491,13 +500,9 @@ struct VMDKSparseExtentMetadata {
     grain_directory: Vec<u32>,
 }
 
-impl VMDKSparseExtentMetadata {
+impl VMDKSparseExtentMetadata {    
     /// Takes a sparse extent file and reads its metadata to recover the grain directory and grain tables
     fn read_from_file(file: &mut File, header: &VMDKSparseFileHeader) -> Result<Self, String> {
-        if header.grain_directory_sector < 0 {
-            // TODO: Handle COWD sparse extents
-            return Err("Primary Grain directory not specified, probably a COWD sparse extent, which is not supported yet".to_string());
-        }
         let mut grain_directory_entry_count: u64 = header.capacity / (header.number_of_grain_table_entries as u64 * header.grain_number);
         if header.capacity % ( header.number_of_grain_table_entries as u64 * header.grain_number ) > 0
         {
@@ -507,9 +512,9 @@ impl VMDKSparseExtentMetadata {
         let mut grain_directory = Vec::with_capacity(grain_directory_entry_count as usize);
         let active_grain_directory_sector = 
         if header.flags & FLAG_USE_SECONDARY_GRAIN_DIRECTORY == FLAG_USE_SECONDARY_GRAIN_DIRECTORY || header.grain_directory_sector == -1 { 
-            header.grain_directory_sector 
-        } else {
             i64::try_from(header.secondary_grain_directory_sector).unwrap()
+        } else {
+            header.grain_directory_sector
         };
         file.seek(io::SeekFrom::Start(u64::try_from(active_grain_directory_sector).unwrap() * SECTOR_SIZE))
             .map_err(|e| format!("Unable to navigate the sparse extent file: {}", e))?;
@@ -576,24 +581,52 @@ fn read_sparse_extent(file: &mut File, buf: &mut [u8], start_offset: u64, sparse
                 read_size += remaining_buffer_size;
             } else {
                 let remaining_read = min(remaining_buffer_size,grain_size_in_bytes as usize);
-                debug!("Remaining read: {}", remaining_read);
                 buf[read_size..read_size + remaining_read].fill(0);
                 read_size += remaining_read;
             }
         } else {
             // The grain is not sparse, read the data from the file
             file.seek(io::SeekFrom::Start(sector_number as u64 * SECTOR_SIZE))?;
+
             let remaining_buffer_size = buf.len() - read_size;
             let mut upper_bound = min(remaining_buffer_size,grain_size_in_bytes as usize);
-            if grain == first_grain {
-                let additional_offset = start_offset - (grain * grain_size_in_bytes);
-                // Panic shouldn't occur as it is highly unlikely that the additional offset exceeds the i64 bounds
-                file.seek(io::SeekFrom::Current(additional_offset.try_into().unwrap()))?;
-                if additional_offset + upper_bound as u64 > grain_size_in_bytes {
-                    upper_bound = (grain_size_in_bytes - additional_offset) as usize;
+            if sparse_metadata.header.flags & FLAG_HAS_COMPRESSED_GRAIN_DATA == FLAG_HAS_COMPRESSED_GRAIN_DATA {
+                // Grain data is compressed, uncompress it to read
+                // We start in a grain marker
+                // Skip the sector number and the compressed data size, at this stage we should know where we are 
+                // thanks to the grain table
+                file.seek(SeekFrom::Current(8))?;
+                let mut size_buf = [0u8; 4];
+                file.read(&mut size_buf)?;
+                let mut decoder = ZlibDecoder::new(BufReader::new(&mut *file));
+                let mut decompressed_buf = vec![0u8; (sparse_metadata.header.grain_number * SECTOR_SIZE) as usize];
+                let bytes_read = decoder.read(&mut decompressed_buf[..])?;
+                let additional_offset = if grain == first_grain {
+                    let additional_offset = start_offset - (grain * grain_size_in_bytes);
+                    if additional_offset + upper_bound as u64 > grain_size_in_bytes {
+                        upper_bound = (grain_size_in_bytes - additional_offset) as usize;
+                    }
+                    additional_offset
+                } else {
+                    0
+                };
+                if upper_bound > bytes_read {
+                    upper_bound = bytes_read;
                 }
+                buf[read_size..read_size + upper_bound].copy_from_slice(&decompressed_buf[additional_offset as usize..upper_bound]);
+                read_size += upper_bound - additional_offset as usize;
+            } else {
+                // Data in raw format, read directly
+                if grain == first_grain {
+                    let additional_offset = start_offset - (grain * grain_size_in_bytes);
+                    // Panic shouldn't occur as it is highly unlikely that the additional offset exceeds the i64 bounds
+                    file.seek(io::SeekFrom::Current(additional_offset.try_into().unwrap()))?;
+                    if additional_offset + upper_bound as u64 > grain_size_in_bytes {
+                        upper_bound = (grain_size_in_bytes - additional_offset) as usize;
+                    }
+                }
+                read_size += file.read(&mut buf[read_size..read_size + upper_bound])?;
             }
-            read_size += file.read(&mut buf[read_size..read_size + upper_bound])?;
         }
     }
     Ok(read_size)
@@ -633,7 +666,7 @@ impl VMDKExtentFile {
     /// # Errors
     /// 
     /// Errors if any IO error occurs while reading or if the provided range exceeds the extent file's limits.
-    fn read_data(&mut self, start_pos: u64, end_pos: u64, buf: &mut [u8]) -> io::Result<usize> {
+    fn read_data(&mut self, start_pos: u64, buf: &mut [u8]) -> io::Result<usize> {
         match self.extent_description.extent_type {
             VMDKExtentType::Flat => {
                 read_raw_extent(self.file.as_mut().map_err(|e| io::Error::new(e.kind(), "Error while opening file"))?, buf, start_pos)
@@ -656,8 +689,12 @@ impl VMDKExtentFile {
                 read_raw_extent(self.file.as_mut().map_err(|e| io::Error::new(e.kind(), "Error while opening file"))?, buf, start_pos)
             },
             VMDKExtentType::VmfsSparse => todo!(),
-            VMDKExtentType::VmfsRdm => todo!(),
-            VMDKExtentType::VmfsRaw => todo!(),
+            VMDKExtentType::VmfsRdm => {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, "Unsupported extent type VMFS RDM"))
+            },
+            VMDKExtentType::VmfsRaw => {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, "Unsupported extent type VMFS RAW"))
+            },
         }
     }
 }
@@ -778,7 +815,7 @@ impl VMDK {
         let mut vmdk_file = File::open(file_path).map_err(|e| format!("Error reading descriptor file: {}", e))?;
         let mut magic_buffer = [0u8; 4];
         let mut sparse_header = None;
-        let descriptor_file = if vmdk_file.read(&mut magic_buffer).map_err(|e| format!("Error reading descriptor file: {}", e))? == 4
+        let mut descriptor_file = if vmdk_file.read(&mut magic_buffer).map_err(|e| format!("Error reading descriptor file: {}", e))? == 4
             && &magic_buffer[..] == b"KDMV" {
             debug!("Monolithic Sparse VMDK detected, extracting descriptor information");
             vmdk_file.seek(SeekFrom::Start(0)).map_err(|e| format!("Error reading descriptor file: {}", e))?;
@@ -797,6 +834,14 @@ impl VMDK {
                 .map_err(|e| format!("Error parsing descriptor file: {}", e))?;
             descriptor_file
         };
+        if descriptor_file.extent_descriptions.len() == 1 
+            && (descriptor_file.header.create_type == VMDKDiskType::MonolithicSparse || descriptor_file.header.create_type == VMDKDiskType::StreamOptimized) {
+            // There is no other extent file in these cases and the filename can be different from the one in the descriptor file
+            // So we just make sure that the file path is set correctly
+            for extent in &mut descriptor_file.extent_descriptions {
+                extent.set_path(Path::new(file_path).file_name().unwrap_or(OsStr::new("")).to_str().ok_or_else(|| "Invalid extent file name in descriptor file".to_string())?);
+            }
+        }
         debug!("Parsed descriptor: {:?}", descriptor_file);
         
         debug!("Opening VMDK extent files if any");
@@ -812,8 +857,13 @@ impl VMDK {
                     debug!("Opening extent file: {}", extent_file_path.display());
                     let mut file = File::open(extent_file_path).ok()?;
                     let sparse_extent_metadata = if extent.extent_type == VMDKExtentType::Sparse {
-                        if sparse_header.is_none() {
-                            file.seek(SeekFrom::Start(0)).ok()?;
+                        if sparse_header.is_none() || descriptor_file.header.create_type == VMDKDiskType::StreamOptimized {
+                            if sparse_header.is_some() && descriptor_file.header.create_type == VMDKDiskType::StreamOptimized && sparse_header.as_ref().unwrap().grain_directory_sector == -1 {
+                                // StreamOptimized disks usually have their header at the end of the file
+                                file.seek(SeekFrom::End(-1024)).ok()?;
+                            } else {
+                                file.seek(SeekFrom::Start(0)).ok()?;
+                            }
                             let mut header_data = [0u8; 80];
                             sparse_header = match file.read(&mut header_data) {
                                 Ok(_) => Some(VMDKSparseFileHeader::parse_sparse_header(&header_data).ok()?),
@@ -937,7 +987,7 @@ impl VMDK {
                 ;
             let buffer_end = (buffer_start + end_position - start_position) as usize;
             let buf_part = &mut buf[0..buffer_end];
-            let read_result = extent.read_data(start_position, end_position, buf_part);
+            let read_result = extent.read_data(start_position, buf_part);
             if let Ok(read_bytes) = read_result {
                 total_read += read_bytes;
             } else {
