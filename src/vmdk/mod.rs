@@ -624,8 +624,6 @@ impl VMDKSparseExtentMetadata {
                     .map_err(|e| format!("Error reading sparse extent file: {}", e))?;
                 grain_table_entries.push(u32::from_le_bytes(grain_buf));
             }
-            debug!("Grain table entries: {:?}", grain_table_entries);
-            break;
         }
         Ok(VMDKSparseExtentMetadata {
             header: header.clone(),
@@ -670,7 +668,7 @@ fn read_sparse_extent(
                 .get(grain as usize)
                 .ok_or(io::Error::new(
                     io::ErrorKind::Other,
-                    "Grain directory entry not found",
+                    format!("Grain directory entry not found: {}", grain),
                 ))?;
         if sector_number == 0 {
             // The grain is sparse
