@@ -7,10 +7,10 @@
 //! 
 //! For the moment VMDK descriptor files not written in UTF-8 encoding are not supported.
 
-use std::{cmp::min, collections::HashMap, ffi::OsStr, fs::{self, File}, io::{self, BufReader, Read, Seek, SeekFrom}, path::Path, str::FromStr, sync::LazyLock, u64};
+use std::{cmp::min, collections::HashMap, ffi::OsStr, fs::{self, File}, io::{self, BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, str::FromStr, sync::LazyLock, u64};
 
 use flate2::bufread::ZlibDecoder;
-use log::{debug, error, info};
+use log::{debug, info};
 use regex::Regex;
 use strum::EnumString;
 
@@ -53,6 +53,8 @@ enum VMDKEncoding {
 }
 
 /// Represents a VMDK header section in a VMDK descriptor file.
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#21-header
 #[derive(Clone, Debug)]
 struct VMDKHeader {
     /// The VMDK version number, must be 1, 2 or 3.
@@ -115,6 +117,8 @@ impl TryFrom<HashMap<String, String>> for VMDKHeader {
 }
 
 /// Access mode for an extent.
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#222-extent-access-mode
 #[derive(Debug, EnumString, PartialEq, Clone)]
 #[strum(serialize_all = "UPPERCASE")]
 enum VMDKExtentAccessMode {
@@ -126,6 +130,9 @@ enum VMDKExtentAccessMode {
     Rw,
 }
 
+/// Represents the disk type for an extent file.
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#223-extent-type
 #[derive(Debug, EnumString, PartialEq, Clone)]
 #[strum(serialize_all = "UPPERCASE")]
 enum VMDKExtentType {
@@ -145,6 +152,8 @@ enum VMDKExtentType {
 }
 
 /// The extent descriptor allows to locate data within the extent files of the virtual disk.
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#22-extent-descriptions
 #[derive(Clone, Debug)]
 struct VMDKExtentDescriptor {
     /// Access mode for the extent
@@ -164,6 +173,7 @@ struct VMDKExtentDescriptor {
 }
 
 impl VMDKExtentDescriptor {
+    /// Sets the path of the extent file.
     fn set_path(&mut self, path: &str) -> () {
         self.extent_file_name = Some(path.to_string());
     }
@@ -200,12 +210,17 @@ impl FromStr for VMDKExtentDescriptor {
 }
 
 /// The change tracking file section was introduced in version 3 and seems to allow definition of a file log of changes made to the virtual disk.
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#23-change-tracking-file-section
 #[derive(Clone, Debug)]
 struct VMDKChangeTrackingSection {
     /// Path of the change tracking file.
     change_track_path: String,
 }
 
+/// The adapter type for a disk.
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#242-the-disk-adapter-type
 #[derive(Debug, EnumString, PartialEq, Clone)]
 enum VMDKDiskAdapterType {
     #[strum(serialize = "ide")]
@@ -218,7 +233,9 @@ enum VMDKDiskAdapterType {
     LegacyESX,
 }
 
-
+/// The disk database section contains various information about the virtual disk.
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#24-disk-database
 #[derive(Clone, Debug)]
 struct VMDKDiskDatabase {
     /// Most encountered value is true
@@ -293,7 +310,7 @@ impl TryFrom<HashMap<String, String>> for VMDKDiskDatabase {
 
 /// Represents a VMDK descriptor file.
 /// 
-/// As defined at: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#2-the-descriptor-file
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#2-the-descriptor-file
 #[derive(Clone, Debug)]
 struct VMDKDescriptorFile {
     /// The VMDK header read from the descriptor file.
@@ -411,7 +428,7 @@ impl FromStr for VMDKDescriptorFile {
 
 /// Represents a VMDK disk type.
 /// 
-/// As defined at: https://github.com/libyal/libvmdk/blame/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#212-disk-type
+/// See also: https://github.com/libyal/libvmdk/blame/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#212-disk-type
 #[derive(Debug, EnumString, PartialEq, Clone)]
 #[strum(serialize_all = "camelCase")]
 enum VMDKDiskType {
@@ -492,6 +509,7 @@ enum VMDKDiskType {
     VmfsThin,
 }
 
+/// Represents the state of a Sparse extent file, including the flattened grain directory
 #[derive(Clone, Debug)]
 struct VMDKSparseExtentMetadata {
     /// The header of the sparse extent file
@@ -502,6 +520,10 @@ struct VMDKSparseExtentMetadata {
 
 impl VMDKSparseExtentMetadata {    
     /// Takes a sparse extent file and reads its metadata to recover the grain directory and grain tables
+    /// 
+    /// # Errors
+    /// 
+    /// Errors if any IO error occurs while reading the file or if some metadata is invalid
     fn read_from_file(file: &mut File, header: &VMDKSparseFileHeader) -> Result<Self, String> {
         let mut grain_directory_entry_count: u64 = header.capacity / (header.number_of_grain_table_entries as u64 * header.grain_number);
         if header.capacity % ( header.number_of_grain_table_entries as u64 * header.grain_number ) > 0
@@ -512,7 +534,7 @@ impl VMDKSparseExtentMetadata {
         let mut grain_directory = Vec::with_capacity(grain_directory_entry_count as usize);
         let active_grain_directory_sector = 
         if header.flags & FLAG_USE_SECONDARY_GRAIN_DIRECTORY == FLAG_USE_SECONDARY_GRAIN_DIRECTORY || header.grain_directory_sector == -1 { 
-            i64::try_from(header.secondary_grain_directory_sector).unwrap()
+            i64::try_from(header.secondary_grain_directory_sector).map_err(|e| format!("Unable to convert secondary grain directory sector to i64: {}", e))?
         } else {
             header.grain_directory_sector
         };
@@ -534,7 +556,7 @@ impl VMDKSparseExtentMetadata {
                    .map_err(|e| format!("Error reading sparse extent file: {}", e))?;
                 grain_table_entries.push(u32::from_le_bytes(grain_buf));
             }
-            debug!("Grain table entry: {:?}", grain_table_entries);
+            debug!("Grain table entries: {:?}", grain_table_entries);
             break;
         }
         Ok(VMDKSparseExtentMetadata {
@@ -567,7 +589,6 @@ fn read_sparse_extent(file: &mut File, buf: &mut [u8], start_offset: u64, sparse
     let first_grain = start_offset / grain_size_in_bytes;
     let last_grain = (start_offset + buf.len() as u64).div_ceil(grain_size_in_bytes);
     let grain_range = first_grain..last_grain;
-    debug!("Grain range: {:?}", grain_range);
     let mut read_size = 0;
     for grain in grain_range {
         let sector_number = *sparse_metadata.grain_directory.get(grain as usize).ok_or(io::Error::new(io::ErrorKind::Other, "Grain directory entry not found"))?;
@@ -633,29 +654,15 @@ fn read_sparse_extent(file: &mut File, buf: &mut [u8], start_offset: u64, sparse
 }
 
 /// Stores a VMDK extent file handle and the associated extent information for reading actual data.
+/// 
+/// This is a struct dedicated to maintain the state of read of a given extent file.
 struct VMDKExtentFile {
     /// The extent description for this file
     extent_description: VMDKExtentDescriptor,
     /// The file handle for the extent file
-    file: Result<File, io::Error>,
+    file: File,
     /// Metadata for sparse extent files, Some if this is a sparse extent file
     sparse_extent_metadata: Option<VMDKSparseExtentMetadata>,
-}
-
-impl Clone for VMDKExtentFile {
-    fn clone(&self) -> Self {
-        let file = if self.file.is_ok() {
-            self.file.as_ref().unwrap().try_clone()
-        } else {
-            let err = self.file.as_ref().err().unwrap();
-            Err(io::Error::new(err.kind(), "Failed to clone file handle"))
-        };
-        Self { 
-            extent_description: self.extent_description.clone(), 
-            file,
-            sparse_extent_metadata: self.sparse_extent_metadata.clone(),
-        }
-    }
 }
 
 impl VMDKExtentFile {
@@ -665,16 +672,15 @@ impl VMDKExtentFile {
     /// 
     /// # Errors
     /// 
-    /// Errors if any IO error occurs while reading or if the provided range exceeds the extent file's limits.
+    /// Errors if any IO error occurs while reading or if the provided range exceeds the extent file's limits. Also errors if the extent type is not supported.
     fn read_data(&mut self, start_pos: u64, buf: &mut [u8]) -> io::Result<usize> {
         match self.extent_description.extent_type {
             VMDKExtentType::Flat => {
-                read_raw_extent(self.file.as_mut().map_err(|e| io::Error::new(e.kind(), "Error while opening file"))?, buf, start_pos)
+                read_raw_extent(&mut self.file, buf, start_pos)
             },
             VMDKExtentType::Sparse => {
                 read_sparse_extent(
-                    self.file.as_mut().map_err(|e| io::Error::new(e.kind(), 
-                    "Error while opening file"))?, 
+                    &mut self.file, 
                     buf, 
                     start_pos,
                     self.sparse_extent_metadata.as_ref().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "No sparse extent metadata available"))?
@@ -686,9 +692,11 @@ impl VMDKExtentFile {
                 Ok(buf.len())
             },
             VMDKExtentType::Vmfs => {
-                read_raw_extent(self.file.as_mut().map_err(|e| io::Error::new(e.kind(), "Error while opening file"))?, buf, start_pos)
+                read_raw_extent(&mut self.file, buf, start_pos)
             },
-            VMDKExtentType::VmfsSparse => todo!(),
+            VMDKExtentType::VmfsSparse => {
+                Err(io::Error::new(io::ErrorKind::InvalidInput, "VMFS Sparse extent type not yet supported"))
+            },
             VMDKExtentType::VmfsRdm => {
                 Err(io::Error::new(io::ErrorKind::InvalidInput, "Unsupported extent type VMFS RDM"))
             },
@@ -700,13 +708,21 @@ impl VMDKExtentFile {
 }
 
 /// Compression method used for data stored in VMDK sparse files
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#412-compression-method
 #[derive(Debug, Clone)]
 enum VMDKCompressionMethod {
+    /// No compression
     None,
+    /// Zlib Deflate compression
     Deflate,
 }
 
-/// Structure representing a sparse file including its header and metadata.
+/// Structure representing a sparse file header.
+/// 
+/// Note that the bytes for the Magic Number are not included in the struct.
+/// 
+/// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#41-file-header
 #[derive(Clone, Debug)]
 struct VMDKSparseFileHeader {
     /// Version of the VMDK Sparse format
@@ -742,6 +758,10 @@ struct VMDKSparseFileHeader {
 
 impl VMDKSparseFileHeader {
     /// Parses a data buffer and tries to create a new VMDKSparseFileHeader object from the provided data buffer.
+    /// 
+    /// # Errors
+    /// 
+    /// Errors if the provided data buffer does not contain a valid VMDK sparse file header or if the header data is too short.
     fn parse_sparse_header(header_data: &[u8]) -> Result<Self, String> {
         if header_data.len() < 80 {
             return Err("Header data too short".to_string());
@@ -789,8 +809,7 @@ fn get_descriptor_from_sparse(file: &mut File, header: &VMDKSparseFileHeader) ->
     return Ok(descriptor);
 }
 
-/// Represents a VMDK virtual disk.
-#[derive(Clone)]
+/// Represents a VMDK virtual disk in memory with the state of the file handles.
 pub struct VMDK {
     /// The descriptor file for the volume
     descriptor_file: VMDKDescriptorFile,
@@ -798,6 +817,34 @@ pub struct VMDK {
     extent_files: Vec<VMDKExtentFile>,
     /// The position of the cursor on the disk
     position: u64,
+    /// Working directory path
+    descriptor_path: PathBuf,
+}
+
+impl Clone for VMDK {
+    fn clone(&self) -> Self {
+        let mut cloned_extent_files = Vec::new();
+        for extent_file in &self.extent_files {
+            if let Some(ref file_name) = extent_file.extent_description.extent_file_name {
+                let extent_file_path = self.descriptor_path.parent().unwrap_or(Path::new("")).join(Path::new(file_name));
+                let file = File::open(extent_file_path);
+                // FIXME: even if it is highly unlikely that and error occurs, we should not silence it if it happens
+                if let Ok(file) = file {
+                    cloned_extent_files.push(VMDKExtentFile {
+                        extent_description: extent_file.extent_description.clone(),
+                        file,
+                        sparse_extent_metadata: extent_file.sparse_extent_metadata.clone(),
+                    });
+                }
+            }
+        }
+        Self { 
+            descriptor_file: self.descriptor_file.clone(), 
+            extent_files: cloned_extent_files, 
+            position: self.position.clone(),
+            descriptor_path: self.descriptor_path.clone(),
+        }
+    }
 }
 
 impl VMDK {
@@ -834,6 +881,9 @@ impl VMDK {
                 .map_err(|e| format!("Error parsing descriptor file: {}", e))?;
             descriptor_file
         };
+        if descriptor_file.header.parent_cid != 0xffffffff {
+            return Err("VMDK files having a parent CID (i.e. VMDK files representing a delta with another disk) are not supported".to_string());
+        }
         if descriptor_file.extent_descriptions.len() == 1 
             && (descriptor_file.header.create_type == VMDKDiskType::MonolithicSparse || descriptor_file.header.create_type == VMDKDiskType::StreamOptimized) {
             // There is no other extent file in these cases and the filename can be different from the one in the descriptor file
@@ -880,7 +930,7 @@ impl VMDK {
                     };
                     Some(VMDKExtentFile { 
                         extent_description: extent.clone(), 
-                        file: Ok(file),
+                        file: file,
                         sparse_extent_metadata,
                     })
                 } else {
@@ -889,22 +939,15 @@ impl VMDK {
             })
             .collect();
         
-        let mut extent_files_iter = extent_files.iter();
+        let mut descriptor_path = PathBuf::new();
+        descriptor_path.push(file_path);
 
-        if extent_files_iter.any(|e| e.file.is_err()) {
-            extent_files_iter = extent_files.iter();
-            error!("Error opening one or more extent files:");
-            for e in extent_files_iter.filter(|e| e.file.is_err()) {
-                error!("- {} for {}", e.file.as_ref().err().unwrap(), e.extent_description.extent_file_name.as_ref().unwrap_or(&String::from("no name")));
-            }
-            return Err(String::from("Error opening one or more extent files"));
-        } else {
-            return Ok(VMDK {
-                descriptor_file,
-                extent_files,
-                position: 0,
-            });
-        }
+        return Ok(VMDK {
+            descriptor_file,
+            extent_files,
+            position: 0,
+            descriptor_path,
+        });
     }
 
     /// Reads data from the VMDK descriptor and prints metadata to the console.
@@ -938,6 +981,10 @@ impl VMDK {
 
     /// Reads data from the VMDK disk into the given buffer, starting from the current position.
     /// Advances the current position by the number of bytes read and returns the number of bytes read.
+    /// 
+    /// # Errors
+    /// 
+    /// Errors if IO errors occur while reading from the extent files. Also errors if trying to read data from unsupported extent types.
     pub fn vmdk_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // First, identify the extent file(s) that contains the data at the desired position
         let buf_len = buf.len() as u64;
@@ -1000,6 +1047,10 @@ impl VMDK {
 
     /// Adds the given offset to the current position in the VMDK disk.
     /// Next call to `vmdk_read` will read from the updated position.
+    /// 
+    /// # Errors
+    /// 
+    /// Errors if the offset is out of bounds or if no extent file can cover the desired position.
     pub fn vmdk_seek(&mut self, offset: SeekFrom) -> io::Result<u64> {
         // First, check that the desired position is within the bounds of the disk as defined by the extent descriptions
         // If we are in the bounds, update the current position and return the new position
