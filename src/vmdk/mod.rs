@@ -718,7 +718,7 @@ fn read_sparse_extent(
                 if upper_bound > bytes_read {
                     upper_bound = bytes_read;
                 }
-                buf[read_size..read_size + upper_bound]
+                buf[read_size + additional_offset as usize..read_size + upper_bound]
                     .copy_from_slice(&decompressed_buf[additional_offset as usize..upper_bound]);
                 read_size += upper_bound - additional_offset as usize;
             } else {
