@@ -12,7 +12,7 @@ use std::{cmp::min, collections::HashMap, ffi::OsStr, fs::{self, File}, io::{sel
 use flate2::bufread::ZlibDecoder;
 use log::{debug, info};
 use regex::Regex;
-use strum::EnumString;
+use serde::{Deserialize, Serialize};
 
 const SECTOR_SIZE: u64 = 512;
 const DESCRIPTOR_FILE_SIGNATURE: &'static str = "# Disk DescriptorFile";
@@ -30,32 +30,32 @@ const _FLAG_HAS_METADATA: u32 = 0x00020000;
 /// Represents the character encoding used for the descriptor file.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blame/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#211-encodings
-#[derive(Debug, EnumString, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 enum VMDKEncoding {
     /// UTF-8 encoding
-    #[strum(serialize = "UTF-8")]
+    #[serde(rename = "UTF-8")]
     Utf8,
     /// Big5 assumed to be equivalent to Windows codepage 950
-    #[strum(serialize = "Big5")]
+    #[serde(rename = "Big5")]
     Big5,
     /// GBK assumed to be equivalent to Windows codepage 936
     /// Seen in VMware editions used for Windows Chinese editions
-    #[strum(serialize = "GBK")]
+    #[serde(rename = "GBK")]
     Gbk,
     /// Shift_JIS assumed to be equivalent to Windows codepage 932
     /// Seen in VMWare Workstation for Windows, Japanese edition
-    #[strum(serialize = "Shift_JIS")]
+    #[serde(rename = "Shift_JIS")]
     ShiftJis,
     /// Windows codepage 1252
     /// Seen in VMWare Player 9 descriptor file uncertain when this was introduced.
-    #[strum(serialize = "windows-1252")]
+    #[serde(rename = "windows-1252")]
     Windows1252,
 }
 
 /// Represents a VMDK header section in a VMDK descriptor file.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#21-header
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct VMDKHeader {
     /// The VMDK version number, must be 1, 2 or 3.
     version: u8,
@@ -85,9 +85,12 @@ impl TryFrom<HashMap<String, String>> for VMDKHeader {
         let version = value.get("version")
             .ok_or("version not found in header")?.parse()
             .map_err(|_| "invalid version in header")?;
-        let encoding = value.get("encoding")
-            .unwrap_or(&String::from("UTF-8")).parse()
-            .map_err(|_| "invalid encoding in header")?;
+        let encoding_str = value.get("encoding").unwrap_or(&String::from("UTF-8")).to_string();
+        let encoding = serde_json::from_value(
+            serde_json::Value::String(
+                encoding_str
+            )
+        ).map_err(|_| "invalid encoding in header")?;
         let cid = u32::from_str_radix(
             value.get("CID").ok_or("CID not found in header")?.as_str(),
             16
@@ -98,9 +101,12 @@ impl TryFrom<HashMap<String, String>> for VMDKHeader {
         ).map_err(|_| "invalid parent CID in header")?;
         let is_native_snapshot = value.get("isNativeSnapshot")
             .map(|s| s.as_str() == "yes");
-        let create_type = value.get("createType")
-           .ok_or("createType not found in header")?.parse()
-           .map_err(|_| "invalid createType in header")?;
+        let create_type_str = value.get("createType").ok_or("createType not found in header")?.to_string();
+        let create_type = serde_json::from_value(
+            serde_json::Value::String(
+                create_type_str
+            )
+        ).map_err(|_| "invalid createType in header")?;
         let parent_file_name_hint = value.get("parentFileNameHint")
            .map(|s| s.to_string());
 
@@ -119,8 +125,8 @@ impl TryFrom<HashMap<String, String>> for VMDKHeader {
 /// Access mode for an extent.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#222-extent-access-mode
-#[derive(Debug, EnumString, PartialEq, Clone)]
-#[strum(serialize_all = "UPPERCASE")]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(rename_all = "UPPERCASE")]
 enum VMDKExtentAccessMode {
     /// No access
     NoAccess,
@@ -133,8 +139,8 @@ enum VMDKExtentAccessMode {
 /// Represents the disk type for an extent file.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#223-extent-type
-#[derive(Debug, EnumString, PartialEq, Clone)]
-#[strum(serialize_all = "UPPERCASE")]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(rename_all = "UPPERCASE")]
 enum VMDKExtentType {
     /// RAW extent data file
     /// Seen in VMWare Player 9 to be also used for devices on Windows
@@ -154,7 +160,7 @@ enum VMDKExtentType {
 /// The extent descriptor allows to locate data within the extent files of the virtual disk.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#22-extent-descriptions
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct VMDKExtentDescriptor {
     /// Access mode for the extent
     access_mode: VMDKExtentAccessMode,
@@ -192,13 +198,15 @@ impl FromStr for VMDKExtentDescriptor {
         let captures = EXTENT_DESCRIPTOR_REGEX.captures(s).ok_or_else(|| {
             format!("Invalid extent descriptor format: {}", s)
         })?;
+        let access_mode_str = serde_json::Value::String(captures.get(1).unwrap().as_str().to_string());
+        let extent_type_str = serde_json::Value::String(captures.get(3).unwrap().as_str().to_string());
         Ok(Self {
             // Match group 1 to 3 will always contain a value at this stage, we can safely unwrap these values.
-            access_mode: VMDKExtentAccessMode::from_str(captures.get(1).unwrap().as_str())
+            access_mode: serde_json::from_value(access_mode_str)
                 .map_err(|_| format!("Invalid access mode in extent description: {}", captures.get(1).unwrap().as_str()))?, 
             sector_number: captures.get(2).unwrap().as_str().parse()
                 .map_err(|_| format!("Invalid sector number in extent description: {}", captures.get(2).unwrap().as_str()))?,
-            extent_type: VMDKExtentType::from_str(captures.get(3).unwrap().as_str())
+            extent_type: serde_json::from_value(extent_type_str)
                 .map_err(|_| format!("Invalid extent type in extent description: {}", captures.get(3).unwrap().as_str()))?,
             extent_file_name: captures.get(4).map(|m| m.as_str().to_string()),
             // Maybe silently ignoring a parse error is not the best solution here
@@ -212,7 +220,7 @@ impl FromStr for VMDKExtentDescriptor {
 /// The change tracking file section was introduced in version 3 and seems to allow definition of a file log of changes made to the virtual disk.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#23-change-tracking-file-section
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct VMDKChangeTrackingSection {
     /// Path of the change tracking file.
     change_track_path: String,
@@ -221,22 +229,22 @@ struct VMDKChangeTrackingSection {
 /// The adapter type for a disk.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#242-the-disk-adapter-type
-#[derive(Debug, EnumString, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 enum VMDKDiskAdapterType {
-    #[strum(serialize = "ide")]
+    #[serde(rename = "ide")]
     Ide,
-    #[strum(serialize = "buslogic")]
+    #[serde(rename = "buslogic")]
     BusLogic,
-    #[strum(serialize = "lsilogic")]
+    #[serde(rename = "lsilogic")]
     LSILogic,
-    #[strum(serialize = "legacyESX")]
+    #[serde(rename = "legacyESX")]
     LegacyESX,
 }
 
 /// The disk database section contains various information about the virtual disk.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#24-disk-database
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct VMDKDiskDatabase {
     /// Most encountered value is true
     ddb_deletable: Option<bool>,
@@ -284,7 +292,8 @@ impl TryFrom<HashMap<String, String>> for VMDKDiskDatabase {
         let ddb_geometry_bios_heads = value.get("ddb.geometry.biosHeads").map(|s| s.parse().unwrap_or(0));
         let ddb_geometry_bios_sectors = value.get("ddb.geometry.biosSectors").map(|s| s.parse().unwrap_or(0));
         let ddb_adapter_type = if let Some(s) = value.get("ddb.adapterType") {
-            VMDKDiskAdapterType::from_str(s).ok()
+            let adapter_type = serde_json::Value::String(s.to_string());
+            serde_json::from_value(adapter_type).map_err(|_| format!("Invalid adapter type: {}", s))?
         } else {
             None
         };
@@ -311,7 +320,7 @@ impl TryFrom<HashMap<String, String>> for VMDKDiskDatabase {
 /// Represents a VMDK descriptor file.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#2-the-descriptor-file
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct VMDKDescriptorFile {
     /// The VMDK header read from the descriptor file.
     header: VMDKHeader,
@@ -429,8 +438,8 @@ impl FromStr for VMDKDescriptorFile {
 /// Represents a VMDK disk type.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blame/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#212-disk-type
-#[derive(Debug, EnumString, PartialEq, Clone)]
-#[strum(serialize_all = "camelCase")]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
 enum VMDKDiskType {
     /// The disk is split into fixed-size extents of maximum 2 GB.
     /// The extents consists of RAW extent data files.
@@ -438,10 +447,10 @@ enum VMDKDiskType {
     /// The 2GbMaxExtentFlat (or twoGbMaxExtentFlat) disk image consists of:
     /// * a descriptor file
     /// * RAW data extent files (<name>-f.vmdk), where is contains a decimal value starting with 1.
-    #[strum(serialize = "2GbMaxExtentFlat")]
+    #[serde(rename = "2GbMaxExtentFlat")]
     TwoGbMaxExtentFlat,
     /// Same as TwoGbMaxExtentFlat, this exists to take into account the 2 possible names
-    #[strum(serialize = "twoGbMaxExtentFlat")]
+    #[serde(rename = "twoGbMaxExtentFlat")]
     TwoGbMaxExtentFlatAlt,
     /// The disk is split into sparse (dynamic-size) extents of maximum 2 GB.
     /// The extents consists of VMDK sparse extent data files.
@@ -449,10 +458,10 @@ enum VMDKDiskType {
     /// The 2GbMaxExtentSparse (or twoGbMaxExtentSparse) disk image consists of:
     /// * a descriptor file
     /// * VMDK sparse data extent files (<name>-s.vmdk), where is contains a decimal value starting with 1.
-    #[strum(serialize = "2GbMaxExtentSparse")]
+    #[serde(rename = "2GbMaxExtentSparse")]
     TwoGbMaxExtentSparse,
     /// Same as TwoGbMaxExtentSparse, this exists to take into account the 2 possible names
-    #[strum(serialize = "twoGbMaxExtentSparse")]
+    #[serde(rename = "twoGbMaxExtentSparse")]
     TwoGbMaxExtentSparseAlt,
     /// Descriptor file with arbitrary extents , used to mount v2i-format.
     Custom,
@@ -490,11 +499,11 @@ enum VMDKDiskType {
     VmfsRaw,
     /// The disk uses a full physical disk device.
     /// Also referred to as Raw Device Map (RDM).
-    #[strum(serialize = "vmfsRDM")]
+    #[serde(rename = "vmfsRDM")]
     VmfsRawDeviceMap,
     /// The disk uses a full physical disk device.
     /// Similar to the Raw Device Map (RDM), but sends SCSI commands to underlying hardware.
-    #[strum(serialize = "vmfsRDMP")]
+    #[serde(rename = "vmfsRDMP")]
     VmfsPassthroughRawDeviceMap,
     /// The disk is split into sparse (dynamic-size) extents.
     /// The extents consists of COWD sparse extent data files.
@@ -710,7 +719,7 @@ impl VMDKExtentFile {
 /// Compression method used for data stored in VMDK sparse files
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#412-compression-method
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum VMDKCompressionMethod {
     /// No compression
     None,
@@ -723,7 +732,7 @@ enum VMDKCompressionMethod {
 /// Note that the bytes for the Magic Number are not included in the struct.
 /// 
 /// See also: https://github.com/libyal/libvmdk/blob/main/documentation/VMWare%20Virtual%20Disk%20Format%20(VMDK).asciidoc#41-file-header
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct VMDKSparseFileHeader {
     /// Version of the VMDK Sparse format
     pub version: u32,
