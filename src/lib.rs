@@ -127,7 +127,7 @@ impl Body {
     pub fn get_sector_size(&self) -> u16 {
         match &self.format {
             BodyFormat::EWF { image, .. } => image.get_sector_size(),
-            BodyFormat::VMDK { image,.. } => image.get_sector_size() as u16,
+            BodyFormat::VMDK { image, .. } => image.get_sector_size() as u16,
             BodyFormat::RAW { .. } => 512,
             // All other compatible formats will be handled here.
         }
@@ -137,7 +137,7 @@ impl Body {
     pub fn format_description(&self) -> &str {
         match &self.format {
             BodyFormat::EWF { description, .. } => description,
-            BodyFormat::VMDK { description , ..} => description,
+            BodyFormat::VMDK { description, .. } => description,
             BodyFormat::RAW { description, .. } => description,
             // Handle additional formats here.
         }
