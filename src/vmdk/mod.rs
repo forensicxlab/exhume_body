@@ -20,7 +20,7 @@ use std::{
 };
 
 use flate2::bufread::ZlibDecoder;
-use log::{debug, info};
+use log::{debug, info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -216,6 +216,16 @@ impl FromStr for VMDKExtentDescriptor {
             serde_json::Value::String(captures.get(1).unwrap().as_str().to_string());
         let extent_type_str =
             serde_json::Value::String(captures.get(3).unwrap().as_str().to_string());
+        let extent_start_sector = captures.get(5).map(|m| match m.as_str().parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                warn!(
+                    "Invalid extent start sector in extent description: {}",
+                    m.as_str()
+                );
+                0
+            }
+        });
         Ok(Self {
             // Match group 1 to 3 will always contain a value at this stage, we can safely unwrap these values.
             access_mode: serde_json::from_value(access_mode_str).map_err(|_| {
@@ -237,10 +247,7 @@ impl FromStr for VMDKExtentDescriptor {
                 )
             })?,
             extent_file_name: captures.get(4).map(|m| m.as_str().to_string()),
-            // Maybe silently ignoring a parse error is not the best solution here
-            extent_start_sector: captures
-                .get(5)
-                .map(|m| m.as_str().parse::<u64>().unwrap_or(0)),
+            extent_start_sector,
             partition_uuid: captures.get(6).map(|m| m.as_str().to_string()),
             device_identifier: captures.get(7).map(|m| m.as_str().to_string()),
         })
