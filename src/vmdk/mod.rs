@@ -1010,6 +1010,20 @@ impl VMDK {
         if descriptor_file.header.parent_cid != 0xffffffff {
             return Err("VMDK files having a parent CID (i.e. VMDK files representing a delta with another disk) are not supported".to_string());
         }
+
+        //  Calculate implicit extent offsets
+        //  When the "start-sector" column is omitted, the extent begins immediately after the previous one.
+        let mut next_start = 0;
+        for extent in &mut descriptor_file.extent_descriptions {
+            if extent.extent_start_sector.is_none() {
+                extent.extent_start_sector = Some(next_start);
+            }
+            next_start = extent
+                .extent_start_sector
+                .unwrap()
+                .saturating_add(extent.sector_number);
+        }
+
         if descriptor_file.extent_descriptions.len() == 1
             && (descriptor_file.header.create_type == VMDKDiskType::MonolithicSparse
                 || descriptor_file.header.create_type == VMDKDiskType::StreamOptimized)
@@ -1183,7 +1197,7 @@ impl VMDK {
                 start_of_extent - self.position
             };
             let buffer_end = (buffer_start + end_position - start_position) as usize;
-            let buf_part = &mut buf[0..buffer_end];
+            let buf_part = &mut buf[buffer_start as usize..buffer_end];
             let read_result = extent.read_data(start_position, buf_part);
             if let Ok(read_bytes) = read_result {
                 total_read += read_bytes;
