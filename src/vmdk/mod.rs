@@ -25,10 +25,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 const SECTOR_SIZE: u64 = 512;
-const DESCRIPTOR_FILE_SIGNATURE: &'static str = "# Disk DescriptorFile";
-const DESCRIPTOR_FILE_EXTENT_SECTION_SIGNATURE: &'static str = "# Extent description";
-const DESCRIPTOR_FILE_CHANGE_TRACKING_SECTION_SIGNATURE: &'static str = "# Change Tracking File";
-const DESCRIPTOR_FILE_DISK_DATABASE_SECTION_SIGNATURE: &'static str = "# The Disk Data Base";
+const DESCRIPTOR_FILE_SIGNATURE: &str = "# Disk DescriptorFile";
+const DESCRIPTOR_FILE_EXTENT_SECTION_SIGNATURE: &str = "# Extent description";
+const DESCRIPTOR_FILE_CHANGE_TRACKING_SECTION_SIGNATURE: &str = "# Change Tracking File";
+const DESCRIPTOR_FILE_DISK_DATABASE_SECTION_SIGNATURE: &str = "# The Disk Data Base";
 
 // Flags used in sparse extent file headers.
 const _FLAG_VALID_NEWLINE_DETECTION_TEST: u32 = 0x00000001;
