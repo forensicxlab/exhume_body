@@ -5,6 +5,9 @@ The exhume Body module is part of the exhume toolkit and is allowing you to exam
 The current supported formats are:
 - RAW
 - EWF
+- VMDK
+
+VMFSSparse (ESXi snapshots, delta files, linked clones) and full physical disk or partition-wide VMDK volumes are not supported.
 
 ## 📄 Getting started
 
