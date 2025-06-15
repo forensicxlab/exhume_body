@@ -1,5 +1,3 @@
-//#![no_std]
-
 pub mod ewf;
 pub mod raw;
 pub mod vmdk;

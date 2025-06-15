@@ -12,3 +12,8 @@ VMFSSparse (ESXi snapshots, delta files, linked clones) and full physical disk o
 ## 📄 Getting started
 
 You can find the full installation and usage guide here: https://www.forensicxlab.com/docs/category/exhume---body
+
+## Related Blog posts
+
+- [🔦 Debunking the Expert Witness Compression Format (EWF)](https://www.forensicxlab.com/blog/ewf)
+- [🔦 A quick walkthrough in the VMDK format](https://www.forensicxlab.com/blog/vmdk)

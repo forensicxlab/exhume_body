@@ -10,8 +10,7 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
         "raw" => {
             info!("Processing the file '{}' in 'raw' format...", file_path);
             reader = Body::new_from(file_path.to_string(), format, Some(*offset));
-            // Assuming reader.print_info() is safe to call; if it uses println!,
-            // you might consider modifying it as well.
+
             debug!("------------------------------------------------------------");
             info!("Selected format: RAW");
             info!("Description: Raw Data");
@@ -101,7 +100,6 @@ fn main() {
         )
         .get_matches();
 
-    // Initialize the logger using the user-specified log level.
     let log_level_str = matches.get_one::<String>("log_level").unwrap();
     let level_filter = match log_level_str.as_str() {
         "error" => LevelFilter::Error,
