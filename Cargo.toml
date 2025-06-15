@@ -1,6 +1,6 @@
 [package]
 name = "exhume_body"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Format-agnostic data extraction from disk images and other potential data structures."
 documentation = "https://www.forensicxlab.com/docs/category/exhume---body"

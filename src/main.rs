@@ -55,7 +55,7 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
 
 fn main() {
     let matches = Command::new("exhume_body")
-        .version("1.0")
+        .version("0.3.1")
         .author("ForensicXlab")
         .about("Exhume a body of data from many file formats.")
         .arg(
