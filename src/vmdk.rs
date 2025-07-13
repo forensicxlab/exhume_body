@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fs::{self, File},
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     str::FromStr,
     sync::LazyLock,
@@ -706,39 +706,50 @@ fn read_sparse_extent(
                 // We start in a grain marker
                 // Skip the sector number and the compressed data size, at this stage we should know where we are
                 // thanks to the grain table
-                file.seek(SeekFrom::Current(8))?;
-                let mut size_buf = [0u8; 4];
-                file.read(&mut size_buf)?;
-                let mut decoder = ZlibDecoder::new(BufReader::new(&mut *file));
-                let mut decompressed_buf =
+                // 1. Position on the grain-marker header
+                file.seek(SeekFrom::Start(sector_number as u64 * SECTOR_SIZE))?;
+
+                // 12-byte marker: 8-byte virtual-LBA + 4-byte compressed-size
+                let mut hdr = [0u8; 12];
+                file.read_exact(&mut hdr)?;
+                let comp_len = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
+
+                // 2. Read the compressed payload
+                let mut comp = vec![0u8; comp_len];
+                file.read_exact(&mut comp)?;
+
+                // 3. Inflate the whole grain
+                let mut inflater = ZlibDecoder::new(&comp[..]);
+                let mut grain_buf =
                     vec![0u8; (sparse_metadata.header.grain_number * SECTOR_SIZE) as usize];
-                let bytes_read = decoder.read(&mut decompressed_buf[..])?;
+                let bytes_read = inflater.read(&mut grain_buf[..])?;
+
+                // 4. Copy slice we were asked for + zero-pad if needed
+                let mut upper_bound = min(remaining_buffer_size, grain_size_in_bytes as usize);
                 let additional_offset = if grain == first_grain {
-                    let additional_offset = start_offset - (grain * grain_size_in_bytes);
-                    if additional_offset + upper_bound as u64 > grain_size_in_bytes {
-                        upper_bound = (grain_size_in_bytes - additional_offset) as usize;
+                    let off = start_offset - (grain * grain_size_in_bytes);
+                    if off + upper_bound as u64 > grain_size_in_bytes {
+                        upper_bound = (grain_size_in_bytes - off) as usize;
                     }
-                    additional_offset
+                    off
                 } else {
                     0
                 };
-                if upper_bound > bytes_read {
-                    upper_bound = bytes_read;
-                }
-                let bytes_to_copy = {
-                    // make sure we never read past what we decompressed
-                    let mut n = upper_bound;
-                    if additional_offset as usize + n > bytes_read {
-                        n = bytes_read - additional_offset as usize;
-                    }
-                    n
-                };
 
-                buf[read_size..read_size + bytes_to_copy].copy_from_slice(
-                    &decompressed_buf
-                        [additional_offset as usize..additional_offset as usize + bytes_to_copy],
-                );
-                read_size += bytes_to_copy;
+                let available = bytes_read.saturating_sub(additional_offset as usize);
+                let to_copy = upper_bound.min(available);
+
+                if to_copy > 0 {
+                    buf[read_size..read_size + to_copy].copy_from_slice(
+                        &grain_buf
+                            [additional_offset as usize..additional_offset as usize + to_copy],
+                    );
+                }
+                if to_copy < upper_bound {
+                    // zero-fill the missing tail
+                    buf[read_size + to_copy..read_size + upper_bound].fill(0);
+                }
+                read_size += upper_bound;
             } else {
                 // Data in raw format, read directly
                 if grain == first_grain {
