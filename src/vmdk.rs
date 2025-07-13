@@ -687,7 +687,7 @@ fn read_sparse_extent(
                     remaining_buffer_size,
                 );
                 buf[read_size..read_size + upper_bound].fill(0);
-                read_size += remaining_buffer_size;
+                read_size += upper_bound;
             } else {
                 let remaining_read = min(remaining_buffer_size, grain_size_in_bytes as usize);
                 buf[read_size..read_size + remaining_read].fill(0);
@@ -725,9 +725,20 @@ fn read_sparse_extent(
                 if upper_bound > bytes_read {
                     upper_bound = bytes_read;
                 }
-                buf[read_size + additional_offset as usize..read_size + upper_bound]
-                    .copy_from_slice(&decompressed_buf[additional_offset as usize..upper_bound]);
-                read_size += upper_bound - additional_offset as usize;
+                let bytes_to_copy = {
+                    // make sure we never read past what we decompressed
+                    let mut n = upper_bound;
+                    if additional_offset as usize + n > bytes_read {
+                        n = bytes_read - additional_offset as usize;
+                    }
+                    n
+                };
+
+                buf[read_size..read_size + bytes_to_copy].copy_from_slice(
+                    &decompressed_buf
+                        [additional_offset as usize..additional_offset as usize + bytes_to_copy],
+                );
+                read_size += bytes_to_copy;
             } else {
                 // Data in raw format, read directly
                 if grain == first_grain {
