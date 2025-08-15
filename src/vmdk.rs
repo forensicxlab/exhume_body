@@ -11,7 +11,7 @@ use std::{
     cmp::min,
     collections::HashMap,
     ffi::OsStr,
-    fs::{self, File},
+    fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     str::FromStr,
@@ -36,6 +36,65 @@ const FLAG_USE_SECONDARY_GRAIN_DIRECTORY: u32 = 0x00000002;
 const _FLAG_USE_ZEROED_GRAIN_TABLE: u32 = 0x00000004;
 const FLAG_HAS_COMPRESSED_GRAIN_DATA: u32 = 0x00010000;
 const _FLAG_HAS_METADATA: u32 = 0x00020000;
+
+/// Enum used for VMDK file probing for autodetect
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VmdkProbe {
+    MonolithicSparseAtStart,
+    MonolithicSparseAtEnd,
+    TextDescriptorLikely,
+}
+
+fn probe_vmdk(file: &mut File, file_len: u64) -> io::Result<Option<VmdkProbe>> {
+    // Check for sparse header at start
+    {
+        let mut magic = [0u8; 4];
+        file.seek(SeekFrom::Start(0))?;
+        if file.read(&mut magic)? == 4 && &magic == b"KDMV" {
+            return Ok(Some(VmdkProbe::MonolithicSparseAtStart));
+        }
+    }
+
+    // Check for sparse header near the end (-1024), common for streamOptimized
+    if file_len >= 1024 {
+        let mut magic = [0u8; 4];
+        file.seek(SeekFrom::End(-1024))?;
+        if file.read(&mut magic)? == 4 && &magic == b"KDMV" {
+            return Ok(Some(VmdkProbe::MonolithicSparseAtEnd));
+        }
+    }
+
+    // Sniff a small prefix for a text descriptor
+    // Read at most 64 KiB and don't read the whole file
+    const SNIFF: usize = 64 * 1024;
+    let to_read = (file_len.min(SNIFF as u64)) as usize;
+    let mut head = vec![0u8; to_read];
+    file.seek(SeekFrom::Start(0))?;
+    let n = file.read(&mut head)?;
+    head.truncate(n);
+
+    // If it clearly looks binary (NUL bytes), reject quickly
+    if head.iter().any(|&b| b == 0) {
+        return Ok(None);
+    }
+
+    // Try to interpret as UTF-8 (fall back to lossy if needed)
+    let binding = std::string::String::from_utf8_lossy(&head);
+    let s = match std::str::from_utf8(&head) {
+        Ok(s) => s,
+        Err(_) => binding.as_ref(),
+    };
+
+    // Require the well-known descriptor markers very early
+    let looks_like_vmdk_text = s.contains("# Disk DescriptorFile")
+        && (s.contains("# Extent description") || s.contains("createType"));
+
+    if looks_like_vmdk_text {
+        return Ok(Some(VmdkProbe::TextDescriptorLikely));
+    }
+
+    Ok(None)
+}
 
 /// Represents the character encoding used for the descriptor file.
 ///
@@ -997,37 +1056,69 @@ impl VMDK {
     pub fn new(file_path: &str) -> Result<VMDK, String> {
         debug!("Opening and reading VMDK descriptor file: {}", file_path);
 
-        // First, identify if we have a monolithic VMDK
         let mut vmdk_file =
             File::open(file_path).map_err(|e| format!("Error reading descriptor file: {}", e))?;
-        let mut magic_buffer = [0u8; 4];
+        let file_len = vmdk_file
+            .metadata()
+            .map_err(|e| format!("stat failed: {}", e))?
+            .len();
+
+        // Fast probe
+        let probe = probe_vmdk(&mut vmdk_file, file_len)
+            .map_err(|e| format!("Error probing file: {}", e))?;
+
         let mut sparse_header = None;
-        let mut descriptor_file = if vmdk_file
-            .read(&mut magic_buffer)
-            .map_err(|e| format!("Error reading descriptor file: {}", e))?
-            == 4
-            && &magic_buffer[..] == b"KDMV"
-        {
-            debug!("Monolithic Sparse VMDK detected, extracting descriptor information");
-            vmdk_file
-                .seek(SeekFrom::Start(0))
-                .map_err(|e| format!("Error reading descriptor file: {}", e))?;
-            let mut header_data = [0u8; 80];
-            sparse_header = match vmdk_file.read(&mut header_data) {
-                Ok(_) => Some(VMDKSparseFileHeader::parse_sparse_header(&header_data)?),
-                Err(e) => return Err(format!("Error reading header in sparse file: {}", e)),
-            };
-            let descriptor =
-                get_descriptor_from_sparse(&mut vmdk_file, sparse_header.as_ref().unwrap())?;
-            descriptor
-        } else {
-            debug!("Trying to decode standalone descriptor file");
-            let descriptor_file_contents = fs::read_to_string(file_path)
-                .map_err(|e| format!("Error reading descriptor file: {}", e))?;
-            let descriptor_file: VMDKDescriptorFile = descriptor_file_contents
-                .parse()
-                .map_err(|e| format!("Error parsing descriptor file: {}", e))?;
-            descriptor_file
+        let mut descriptor_file = match probe {
+            Some(VmdkProbe::MonolithicSparseAtStart) => {
+                debug!("Monolithic Sparse VMDK detected at start, extracting descriptor");
+                vmdk_file
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|e| format!("Error seeking: {}", e))?;
+                let mut header_data = [0u8; 80];
+                vmdk_file
+                    .read_exact(&mut header_data)
+                    .map_err(|e| format!("Error reading sparse header: {}", e))?;
+                sparse_header = Some(VMDKSparseFileHeader::parse_sparse_header(&header_data)?);
+                get_descriptor_from_sparse(&mut vmdk_file, sparse_header.as_ref().unwrap())?
+            }
+            Some(VmdkProbe::MonolithicSparseAtEnd) => {
+                debug!("Monolithic Sparse VMDK header near EOF, extracting descriptor");
+                // For streamOptimized, header often resides at the end; read it there:
+                vmdk_file
+                    .seek(SeekFrom::End(-1024))
+                    .map_err(|e| format!("Error seeking end for sparse header: {}", e))?;
+                let mut header_data = [0u8; 80];
+                vmdk_file
+                    .read_exact(&mut header_data)
+                    .map_err(|e| format!("Error reading tail sparse header: {}", e))?;
+                sparse_header = Some(VMDKSparseFileHeader::parse_sparse_header(&header_data)?);
+                get_descriptor_from_sparse(&mut vmdk_file, sparse_header.as_ref().unwrap())?
+            }
+            Some(VmdkProbe::TextDescriptorLikely) => {
+                debug!("Text descriptor likely; reading a small chunk only");
+                // Read only a *bounded* amount to parse the descriptor
+                // Most descriptor files are tiny. But guard anyway.
+                const MAX_DESC: usize = 512 * 1024; // 512 KiB cap
+                let to_read = (file_len.min(MAX_DESC as u64)) as usize;
+                let mut buf = vec![0u8; to_read];
+                vmdk_file
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|e| format!("Error seeking: {}", e))?;
+                let n = vmdk_file
+                    .read(&mut buf)
+                    .map_err(|e| format!("Error reading descriptor chunk: {}", e))?;
+                let descriptor_contents = String::from_utf8_lossy(&buf[..n]);
+                descriptor_contents
+                    .parse::<VMDKDescriptorFile>()
+                    .map_err(|e| format!("Error parsing descriptor file: {}", e))?
+            }
+            None => {
+                // Fast fail: definitely not a VMDK and we only touched ~64 KiB.
+                return Err(
+                    "Not a VMDK: no KDMV header and no descriptor signature in the first 64 KiB"
+                        .to_string(),
+                );
+            }
         };
         if descriptor_file.header.parent_cid != 0xffffffff {
             return Err("VMDK files having a parent CID (i.e. VMDK files representing a delta with another disk) are not supported".to_string());
