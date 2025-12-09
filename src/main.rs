@@ -1,4 +1,4 @@
-use clap::{value_parser, Arg, Command};
+use clap::*;
 use clap_num::maybe_hex;
 use exhume_body::Body;
 use log::{debug, error, info, LevelFilter};
@@ -55,8 +55,8 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
 
 fn main() {
     let matches = Command::new("exhume_body")
-        .version("0.3.4")
-        .author("ForensicXlab")
+        .version(crate_version!())
+        .author(crate_authors!())
         .about("Exhume a body of data from many file formats.")
         .arg(
             Arg::new("body")
