@@ -368,7 +368,7 @@ impl EWF {
             ];
 
             /// Map identifier → human-readable label.
-            fn pretty<'a>(id: &'a str) -> &'a str {
+            fn pretty(id: &str) -> &str {
                 match id {
                     "c" | "cn" => "Case Number",
                     "n" | "en" => "Evidence Number",

@@ -37,9 +37,18 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
             info!("Processing the file '{}' in 'auto' format...", file_path);
             reader = Body::new_from(file_path.to_string(), format, Some(*offset));
         }
+        "aff4" | "aff4l" => {
+            info!("Processing the file '{}' in 'aff4' format...", file_path);
+            reader = Body::new_from(file_path.to_string(), "aff4", Some(*offset));
+            info!("------------------------------------------------------------");
+            info!("Selected format: AFF4 / AFF4-L");
+            info!("Description: AFF4 ImageStream (Zip volume).");
+            info!("Sector size: {:?}", reader.get_sector_size());
+            debug!("------------------------------------------------------------");
+        }
         _ => {
             error!(
-                "Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', and 'auto'.",
+                "Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff4', and 'auto'.",
                 format
             );
             std::process::exit(1);
@@ -72,7 +81,7 @@ fn main() {
                 .long("format")
                 .value_parser(value_parser!(String))
                 .required(false)
-                .help("The format of the file, either 'raw', 'ewf', 'vmdk' or 'auto'."),
+                .help("The format of the file, either 'raw', 'ewf', 'vmdk', 'aff4' or 'auto'."),
         )
         .arg(
             Arg::new("size")

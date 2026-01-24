@@ -16,7 +16,6 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::LazyLock,
-    u64,
 };
 
 use flate2::bufread::ZlibDecoder;
@@ -74,7 +73,7 @@ fn probe_vmdk(file: &mut File, file_len: u64) -> io::Result<Option<VmdkProbe>> {
     head.truncate(n);
 
     // If it clearly looks binary (NUL bytes), reject quickly
-    if head.iter().any(|&b| b == 0) {
+    if head.contains(&0) {
         return Ok(None);
     }
 
@@ -254,7 +253,7 @@ struct VMDKExtentDescriptor {
 
 impl VMDKExtentDescriptor {
     /// Sets the path of the extent file.
-    fn set_path(&mut self, path: &str) -> () {
+    fn set_path(&mut self, path: &str) {
         self.extent_file_name = Some(path.to_string());
     }
 }
@@ -1000,7 +999,7 @@ fn get_descriptor_from_sparse(
     .map_err(|e| format!("Error reading embedded descriptor file: {}", e))?;
     let descriptor_string = String::from_utf8_lossy(&descriptor_buffer);
     let descriptor: VMDKDescriptorFile = descriptor_string.parse()?;
-    return Ok(descriptor);
+    Ok(descriptor)
 }
 
 /// Represents a VMDK virtual disk in memory with the state of the file handles.
@@ -1201,7 +1200,7 @@ impl VMDK {
                     };
                     Some(VMDKExtentFile {
                         extent_description: extent.clone(),
-                        file: file,
+                        file,
                         sparse_extent_metadata,
                     })
                 } else {

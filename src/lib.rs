@@ -1,6 +1,9 @@
+pub mod aff4;
 pub mod ewf;
 pub mod raw;
 pub mod vmdk;
+
+use aff4::AFF4;
 use ewf::EWF;
 use log::{error, info};
 use raw::RAW;
@@ -20,6 +23,10 @@ pub enum BodyFormat {
     },
     VMDK {
         image: vmdk::VMDK,
+        description: String,
+    },
+    AFF4 {
+        image: aff4::AFF4,
         description: String,
     },
     // Other compatible image formats here.
@@ -91,9 +98,25 @@ impl Body {
                     },
                 }
             }
+            "aff4" | "aff4l" => {
+                let evidence = match AFF4::new(&file_path) {
+                    Ok(a) => a,
+                    Err(err) => {
+                        error!("Error: {}", err);
+                        std::process::exit(1);
+                    }
+                };
+                Body {
+                    path: file_path,
+                    format: BodyFormat::AFF4 {
+                        image: evidence,
+                        description: "AFF4 / AFF4-L (ImageStream)".to_string(),
+                    },
+                }
+            }
             _ => {
                 error!(
-                    "Error: Invalid format '{}'. Supported formats are 'raw', 'ewf', or 'auto'.",
+                    "Error: Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff4' or 'auto'.",
                     format
                 );
                 std::process::exit(1);
@@ -117,8 +140,9 @@ impl Body {
         match &self.format {
             BodyFormat::EWF { image, .. } => image.print_info(),
             BodyFormat::VMDK { image, .. } => image.print_info(),
+            BodyFormat::AFF4 { image, .. } => image.print_info(),
             BodyFormat::RAW { .. } => (),
-            // All other compatible formats will be handled here.
+            // All other compatible formats are handled here.
         }
     }
 
@@ -126,8 +150,9 @@ impl Body {
         match &self.format {
             BodyFormat::EWF { image, .. } => image.get_sector_size(),
             BodyFormat::VMDK { image, .. } => image.get_sector_size() as u16,
+            BodyFormat::AFF4 { image, .. } => image.get_sector_size(),
             BodyFormat::RAW { .. } => 512,
-            // All other compatible formats will be handled here.
+            // All other compatible formats are handled here.
         }
     }
 
@@ -137,6 +162,7 @@ impl Body {
             BodyFormat::EWF { description, .. } => description,
             BodyFormat::VMDK { description, .. } => description,
             BodyFormat::RAW { description, .. } => description,
+            BodyFormat::AFF4 { description, .. } => description,
             // Handle additional formats here.
         }
     }
@@ -159,6 +185,14 @@ impl Body {
             return BodyFormat::VMDK {
                 image: evidence,
                 description: "VMDK (Virtual Machine Disk) file".to_string(),
+            };
+        }
+
+        if let Ok(evidence) = AFF4::new(file_path) {
+            info!("Detected an AFF4/AFF4-L volume (ImageStream).");
+            return BodyFormat::AFF4 {
+                image: evidence,
+                description: "AFF4 / AFF4-L (ImageStream)".to_string(),
             };
         }
 
@@ -185,6 +219,7 @@ impl Read for Body {
             BodyFormat::EWF { image, .. } => image.read(buf),
             BodyFormat::VMDK { image, .. } => image.read(buf),
             BodyFormat::RAW { image, .. } => image.read(buf),
+            BodyFormat::AFF4 { image, .. } => image.read(buf),
             // TODO: Handle other compatible formats here.
         }
     }
@@ -196,6 +231,7 @@ impl Seek for Body {
             BodyFormat::EWF { image, .. } => image.seek(pos),
             BodyFormat::VMDK { image, .. } => image.seek(pos),
             BodyFormat::RAW { image, .. } => image.seek(pos),
+            BodyFormat::AFF4 { image, .. } => image.seek(pos),
             // TODO: Handle other compatible formats here.
         }
     }
