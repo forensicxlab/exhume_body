@@ -188,6 +188,7 @@ impl Body {
             };
         }
 
+        // Then try AFF4 detection.
         if let Ok(evidence) = AFF4::new(file_path) {
             info!("Detected an AFF4/AFF4-L volume (ImageStream).");
             return BodyFormat::AFF4 {
