@@ -4,6 +4,7 @@ use rio_api::model::{Literal, Term};
 use rio_api::parser::TriplesParser;
 use rio_turtle::TurtleParser;
 
+use lz4_flex::block;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
@@ -1001,8 +1002,6 @@ impl AFF4 {
         })
     }
 }
-
-use lz4_flex::block;
 
 impl AFF4 {
     fn load_chunk_into_cache(&mut self, member: &str, chunk_index: u32) -> io::Result<()> {
