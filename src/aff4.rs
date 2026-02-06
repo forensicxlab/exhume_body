@@ -244,7 +244,6 @@ pub struct AFF4 {
 
 impl AFF4 {
     pub fn new(path: &str) -> Result<Self, String> {
-        // Keep your public signature, but internally use Aff4Error.
         match Self::new_impl(path) {
             Ok(v) => Ok(v),
             Err(e) => Err(e.to_string()),
@@ -263,7 +262,7 @@ impl AFF4 {
             .map_err(|e| Aff4Error::Format(format!("information.turtle not utf-8: {}", e)))?;
         let meta = Self::parse_metadata(&turtle_content)?;
 
-        // Locate map and idx based on your current strategy: "{data_base_path}/map"
+        // Locate map and idx based on the current strategy: "{data_base_path}/map"
         let map_member = format!("{}/map", meta.data_base_path);
         if !zip.directory().contains_key(&map_member) {
             return Err(Aff4Error::Missing(format!(
