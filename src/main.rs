@@ -33,6 +33,15 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
             info!("Description: VMDK (Virtual Machine Disk) file.");
             debug!("------------------------------------------------------------");
         }
+        "aff" => {
+            info!("Processing the file '{}' in 'aff' format...", file_path);
+            reader = Body::new_from(file_path.to_string(), "aff", Some(*offset));
+            info!("------------------------------------------------------------");
+            info!("Selected format: AFF");
+            info!("Description: Advanced Forensics Format.");
+            info!("Sector size: {:?}", reader.get_sector_size());
+            debug!("------------------------------------------------------------");
+        }
         "auto" => {
             info!("Processing the file '{}' in 'auto' format...", file_path);
             reader = Body::new_from(file_path.to_string(), format, Some(*offset));
@@ -48,7 +57,7 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
         }
         _ => {
             error!(
-                "Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff4', and 'auto'.",
+                "Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff', 'aff4', and 'auto'.",
                 format
             );
             std::process::exit(1);
@@ -81,7 +90,9 @@ fn main() {
                 .long("format")
                 .value_parser(value_parser!(String))
                 .required(false)
-                .help("The format of the file, either 'raw', 'ewf', 'vmdk', 'aff4' or 'auto'."),
+                .help(
+                    "The format of the file, either 'raw', 'ewf', 'vmdk', 'aff', 'aff4' or 'auto'.",
+                ),
         )
         .arg(
             Arg::new("size")

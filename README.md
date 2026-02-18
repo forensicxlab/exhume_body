@@ -6,6 +6,7 @@ The current supported formats are:
 - RAW
 - EWF
 - VMDK
+- AFF
 - AFF4 (Cellebrite/MacQuisition implementation).
 
 VMFSSparse (ESXi snapshots, delta files, linked clones) and full physical disk or partition-wide VMDK volumes are not supported.

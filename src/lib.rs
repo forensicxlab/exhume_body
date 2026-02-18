@@ -1,8 +1,10 @@
+pub mod aff;
 pub mod aff4;
 pub mod ewf;
 pub mod raw;
 pub mod vmdk;
 
+use aff::AFF;
 use aff4::AFF4;
 use ewf::EWF;
 use log::{error, info};
@@ -23,6 +25,10 @@ pub enum BodyFormat {
     },
     VMDK {
         image: vmdk::VMDK,
+        description: String,
+    },
+    AFF {
+        image: aff::AFF,
         description: String,
     },
     AFF4 {
@@ -98,6 +104,22 @@ impl Body {
                     },
                 }
             }
+            "aff" => {
+                let evidence = match AFF::new(&file_path) {
+                    Ok(evidence) => evidence,
+                    Err(err) => {
+                        error!("Error: {}", err);
+                        std::process::exit(1);
+                    }
+                };
+                Body {
+                    path: file_path,
+                    format: BodyFormat::AFF {
+                        image: evidence,
+                        description: "Advanced Forensics Format (AFF)".to_string(),
+                    },
+                }
+            }
             "aff4" | "aff4l" => {
                 let evidence = match AFF4::new(&file_path) {
                     Ok(a) => a,
@@ -116,7 +138,7 @@ impl Body {
             }
             _ => {
                 error!(
-                    "Error: Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff4' or 'auto'.",
+                    "Error: Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff', 'aff4' or 'auto'.",
                     format
                 );
                 std::process::exit(1);
@@ -140,6 +162,7 @@ impl Body {
         match &self.format {
             BodyFormat::EWF { image, .. } => image.print_info(),
             BodyFormat::VMDK { image, .. } => image.print_info(),
+            BodyFormat::AFF { image, .. } => image.print_info(),
             BodyFormat::AFF4 { image, .. } => image.print_info(),
             BodyFormat::RAW { .. } => (),
             // All other compatible formats are handled here.
@@ -150,6 +173,7 @@ impl Body {
         match &self.format {
             BodyFormat::EWF { image, .. } => image.get_sector_size(),
             BodyFormat::VMDK { image, .. } => image.get_sector_size() as u16,
+            BodyFormat::AFF { image, .. } => image.get_sector_size(),
             BodyFormat::AFF4 { image, .. } => image.get_sector_size(),
             BodyFormat::RAW { .. } => 512,
             // All other compatible formats are handled here.
@@ -162,6 +186,7 @@ impl Body {
             BodyFormat::EWF { description, .. } => description,
             BodyFormat::VMDK { description, .. } => description,
             BodyFormat::RAW { description, .. } => description,
+            BodyFormat::AFF { description, .. } => description,
             BodyFormat::AFF4 { description, .. } => description,
             // Handle additional formats here.
         }
@@ -185,6 +210,15 @@ impl Body {
             return BodyFormat::VMDK {
                 image: evidence,
                 description: "VMDK (Virtual Machine Disk) file".to_string(),
+            };
+        }
+
+        // Then try AFF detection.
+        if let Ok(evidence) = AFF::new(file_path) {
+            info!("Detected an AFF disk image.");
+            return BodyFormat::AFF {
+                image: evidence,
+                description: "Advanced Forensics Format (AFF)".to_string(),
             };
         }
 
@@ -220,6 +254,7 @@ impl Read for Body {
             BodyFormat::EWF { image, .. } => image.read(buf),
             BodyFormat::VMDK { image, .. } => image.read(buf),
             BodyFormat::RAW { image, .. } => image.read(buf),
+            BodyFormat::AFF { image, .. } => image.read(buf),
             BodyFormat::AFF4 { image, .. } => image.read(buf),
             // TODO: Handle other compatible formats here.
         }
@@ -232,6 +267,7 @@ impl Seek for Body {
             BodyFormat::EWF { image, .. } => image.seek(pos),
             BodyFormat::VMDK { image, .. } => image.seek(pos),
             BodyFormat::RAW { image, .. } => image.seek(pos),
+            BodyFormat::AFF { image, .. } => image.seek(pos),
             BodyFormat::AFF4 { image, .. } => image.seek(pos),
             // TODO: Handle other compatible formats here.
         }
