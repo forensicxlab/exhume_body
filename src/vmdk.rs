@@ -63,10 +63,13 @@ fn probe_vmdk(file: &mut File, file_len: u64) -> io::Result<Option<VmdkProbe>> {
         }
     }
 
-    // Sniff a small prefix for a text descriptor
-    // Read at most 64 KiB and don't read the whole file
-    const SNIFF: usize = 64 * 1024;
+    // Sniff a small prefix for a text descriptor.
+    // Keep this tiny to avoid work on large non-VMDK files.
+    const SNIFF: usize = 16 * 1024;
     let to_read = (file_len.min(SNIFF as u64)) as usize;
+    if to_read == 0 {
+        return Ok(None);
+    }
     let mut head = vec![0u8; to_read];
     file.seek(SeekFrom::Start(0))?;
     let n = file.read(&mut head)?;
@@ -74,6 +77,16 @@ fn probe_vmdk(file: &mut File, file_len: u64) -> io::Result<Option<VmdkProbe>> {
 
     // If it clearly looks binary (NUL bytes), reject quickly
     if head.contains(&0) {
+        return Ok(None);
+    }
+
+    // If many bytes are non-printable control chars, this is almost certainly
+    // not a text descriptor.
+    let non_printable = head
+        .iter()
+        .filter(|&&b| !(b == b'\n' || b == b'\r' || b == b'\t' || b.is_ascii_graphic()))
+        .count();
+    if non_printable.saturating_mul(100) > head.len().saturating_mul(5) {
         return Ok(None);
     }
 
@@ -86,7 +99,10 @@ fn probe_vmdk(file: &mut File, file_len: u64) -> io::Result<Option<VmdkProbe>> {
 
     // Require the well-known descriptor markers very early
     let looks_like_vmdk_text = s.contains("# Disk DescriptorFile")
-        && (s.contains("# Extent description") || s.contains("createType"));
+        && s.contains("# Extent description")
+        && s.contains("createType")
+        && s.contains("CID=")
+        && s.contains("parentCID=");
 
     if looks_like_vmdk_text {
         return Ok(Some(VmdkProbe::TextDescriptorLikely));
@@ -1095,9 +1111,9 @@ impl VMDK {
             }
             Some(VmdkProbe::TextDescriptorLikely) => {
                 debug!("Text descriptor likely; reading a small chunk only");
-                // Read only a *bounded* amount to parse the descriptor
-                // Most descriptor files are tiny. But guard anyway.
-                const MAX_DESC: usize = 512 * 1024; // 512 KiB cap
+                // Read only a *bounded* amount to parse the descriptor.
+                // Descriptor files are usually very small.
+                const MAX_DESC: usize = 128 * 1024;
                 let to_read = (file_len.min(MAX_DESC as u64)) as usize;
                 let mut buf = vec![0u8; to_read];
                 vmdk_file
@@ -1112,13 +1128,16 @@ impl VMDK {
                     .map_err(|e| format!("Error parsing descriptor file: {}", e))?
             }
             None => {
-                // Fast fail: definitely not a VMDK and we only touched ~64 KiB.
+                // Fast fail: definitely not a VMDK and we only touched a small prefix.
                 return Err(
-                    "Not a VMDK: no KDMV header and no descriptor signature in the first 64 KiB"
+                    "Not a VMDK: no KDMV header and no valid descriptor signature in the first 16 KiB"
                         .to_string(),
                 );
             }
         };
+        if descriptor_file.extent_descriptions.is_empty() {
+            return Err("Not a VMDK: descriptor has no extent descriptions".to_string());
+        }
         if descriptor_file.header.parent_cid != 0xffffffff {
             return Err("VMDK files having a parent CID (i.e. VMDK files representing a delta with another disk) are not supported".to_string());
         }

@@ -244,6 +244,15 @@ pub struct AFF4 {
 
 impl AFF4 {
     pub fn new(path: &str) -> Result<Self, String> {
+        // Fast reject path: AFF4 is ZIP-based and should start with a local file header.
+        // Avoid expensive ZIP64/EOCD scanning on large non-AFF4 raw images.
+        if let Ok(mut file) = File::open(path) {
+            let mut sig = [0u8; 4];
+            if file.read_exact(&mut sig).is_err() || sig != LOCAL_FILE_SIG {
+                return Err("not an AFF4 ZIP container (missing local header signature)".into());
+            }
+        }
+
         match Self::new_impl(path) {
             Ok(v) => Ok(v),
             Err(e) => Err(e.to_string()),
