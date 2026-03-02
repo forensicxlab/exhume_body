@@ -66,7 +66,7 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
     reader.print_info();
 
     let mut bytes = vec![0u8; *size as usize];
-    reader.read(&mut bytes).unwrap();
+    reader.read_exact(&mut bytes).unwrap();
     let result = String::from_utf8_lossy(&bytes);
     println!("{}", result);
 }

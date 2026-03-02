@@ -55,19 +55,14 @@ type Aff4Result<T> = Result<T, Aff4Error>;
 // -----------------------------
 
 /// Supported AFF4 compression methods (inside segments/chunks).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum CompressionMethod {
+    #[default]
     None,
     Lz4,
     Snappy,
     Zlib,
     Unknown,
-}
-
-impl Default for CompressionMethod {
-    fn default() -> Self {
-        CompressionMethod::None
-    }
 }
 
 /// Central directory entry we care about.
@@ -208,7 +203,7 @@ impl ZipReader {
         let payload = self.payload_offset(e.header_offset)?;
         let needed = out.len() as u64;
 
-        if offset_in_member.checked_add(needed).unwrap_or(u64::MAX) > e.compressed_size {
+        if offset_in_member.saturating_add(needed) > e.compressed_size {
             return Err(Aff4Error::Format(format!(
                 "range read past end: {} off=0x{:x} len=0x{:x} member_len=0x{:x}",
                 name, offset_in_member, needed, e.compressed_size
@@ -457,7 +452,7 @@ impl AFF4 {
         let chunk = 4096;
 
         while cursor > 0 {
-            let start_pos = if cursor > chunk { cursor - chunk } else { 0 };
+            let start_pos = cursor.saturating_sub(chunk);
             let read_len = (cursor - start_pos) as usize;
 
             file.seek(SeekFrom::Start(start_pos))?;
@@ -904,8 +899,7 @@ impl Read for AFF4 {
             let (member, seg_off) = self
                 .resolve_segment_member(&iv.target_urn, logical_off)
                 .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
+                    io::Error::other(
                         format!(
                             "cannot resolve segment: base={:?} logical_off=0x{:x}",
                             iv.target_urn, logical_off
@@ -928,8 +922,7 @@ impl Read for AFF4 {
             self.load_chunk_into_cache(&member, chunk_index)?;
 
             if within_chunk >= self.cache.data.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
+                return Err(io::Error::other(
                     format!(
                         "within_chunk=0x{:x} beyond decoded chunk size=0x{:x}",
                         within_chunk,
@@ -969,15 +962,13 @@ impl AFF4 {
         idx: u32,
     ) -> io::Result<IndexEntry> {
         let z = zip.directory().get(index_member).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
+            io::Error::other(
                 format!("missing index member {:?}", index_member),
             )
         })?;
 
         if z.compression_method != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!(
                     "index member {:?} is ZIP-compressed (unexpected)",
                     index_member
@@ -987,8 +978,7 @@ impl AFF4 {
 
         let off = (idx as u64) * 12;
         if off + 12 > z.compressed_size {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!(
                     "index entry {} out of range: {:?} size=0x{:x}",
                     idx, index_member, z.compressed_size
@@ -998,7 +988,7 @@ impl AFF4 {
 
         let mut raw = [0u8; 12];
         zip.read_store_range(index_member, off, &mut raw)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         let lo = u32::from_le_bytes(raw[0..4].try_into().unwrap());
         let hi = u32::from_le_bytes(raw[4..8].try_into().unwrap());
@@ -1024,9 +1014,9 @@ impl AFF4 {
         let file = self
             .file
             .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "AFF4 file is closed"))?;
+            .ok_or_else(|| io::Error::other("AFF4 file is closed"))?;
         let mut zip = ZipReader::new(file, self.zip_directory.clone())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         let index_member = format!("{}.index", member);
 
@@ -1036,8 +1026,7 @@ impl AFF4 {
             .zip_directory
             .get(member)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Other,
+                io::Error::other(
                     format!("missing data member {:?}", member),
                 )
             })?
@@ -1047,8 +1036,7 @@ impl AFF4 {
         let c_len = ent.c_len as u64;
 
         if c_len == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!(
                     "index says chunk {} has zero length (member {:?})",
                     chunk_index, member
@@ -1056,8 +1044,7 @@ impl AFF4 {
             ));
         }
         if c_off + c_len > member_len {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!(
                     "index out of bounds: chunk {} c_off=0x{:x} c_len=0x{:x} member_len=0x{:x}",
                     chunk_index, c_off, c_len, member_len
@@ -1067,7 +1054,7 @@ impl AFF4 {
 
         let mut compressed = vec![0u8; ent.c_len as usize];
         zip.read_store_range(member, c_off, &mut compressed)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         // Decode according to AFF4 layer-2 compression declared by metadata.
         let decoded = match self.compression {
@@ -1080,8 +1067,7 @@ impl AFF4 {
                     let mut out = vec![0u8; self.chunk_size as usize];
                     block::decompress_into(&compressed, &mut out).map_err(|err| {
                         let magic = compressed.get(0..4).unwrap_or(&compressed);
-                        io::Error::new(
-                            io::ErrorKind::Other,
+                        io::Error::other(
                             format!(
                                 "lz4 block decompress failed for chunk {}: {} (first4={:02x?})",
                                 chunk_index, err, magic

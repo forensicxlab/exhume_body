@@ -84,7 +84,9 @@ fn probe_vmdk(file: &mut File, file_len: u64) -> io::Result<Option<VmdkProbe>> {
     // not a text descriptor.
     let non_printable = head
         .iter()
-        .filter(|&&b| !(b == b'\n' || b == b'\r' || b == b'\t' || b.is_ascii_graphic()))
+        .filter(|&&b| {
+            !(b == b'\n' || b == b'\r' || b == b'\t' || b == b' ' || b.is_ascii_graphic())
+        })
         .count();
     if non_printable.saturating_mul(100) > head.len().saturating_mul(5) {
         return Ok(None);
@@ -550,11 +552,7 @@ impl FromStr for VMDKDescriptorFile {
         Ok(VMDKDescriptorFile {
             header: VMDKHeader::try_from(file_header_hashmap)?,
             extent_descriptions,
-            change_tracking_file: if let Some(change_track_path) = change_track_path {
-                Some(VMDKChangeTrackingSection { change_track_path })
-            } else {
-                None
-            },
+            change_tracking_file: change_track_path.map(|change_track_path| VMDKChangeTrackingSection { change_track_path }),
             disk_database: VMDKDiskDatabase::try_from(ddb_hashmap).ok(),
         })
     }
@@ -661,7 +659,7 @@ impl VMDKSparseExtentMetadata {
     fn read_from_file(file: &mut File, header: &VMDKSparseFileHeader) -> Result<Self, String> {
         let mut grain_directory_entry_count: u64 =
             header.capacity / (header.number_of_grain_table_entries as u64 * header.grain_number);
-        if header.capacity % (header.number_of_grain_table_entries as u64 * header.grain_number) > 0
+        if !header.capacity.is_multiple_of(header.number_of_grain_table_entries as u64 * header.grain_number)
         {
             grain_directory_entry_count += 1
         }
@@ -747,8 +745,7 @@ fn read_sparse_extent(
             *sparse_metadata
                 .grain_directory
                 .get(grain as usize)
-                .ok_or(io::Error::new(
-                    io::ErrorKind::Other,
+                .ok_or(io::Error::other(
                     format!("Grain directory entry not found: {}", grain),
                 ))?;
         if sector_number == 0 {
@@ -965,7 +962,7 @@ impl VMDKSparseFileHeader {
                 1 => VMDKCompressionMethod::Deflate,
                 _ => return Err("Unsupported compression method".to_string()),
             };
-        return Ok(Self {
+        Ok(Self {
             version: u32::from_le_bytes(<[u8; 4]>::try_from(&header_data[4..8]).unwrap()),
             flags: u32::from_le_bytes(<[u8; 4]>::try_from(&header_data[8..12]).unwrap()),
             capacity: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[12..20]).unwrap()),
@@ -990,7 +987,7 @@ impl VMDKSparseFileHeader {
             ),
             is_dirty: header_data[72] & 0x01 == 1,
             compression_method,
-        });
+        })
     }
 }
 
@@ -1009,7 +1006,7 @@ fn get_descriptor_from_sparse(
     let mut descriptor_buffer =
         vec![0u8; header.embedded_descriptor_sectors_count as usize * SECTOR_SIZE as usize];
     file.seek(io::SeekFrom::Start(
-        header.embedded_descriptor_sector * SECTOR_SIZE as u64,
+        header.embedded_descriptor_sector * SECTOR_SIZE,
     ))
     .and_then(|_| file.read_exact(&mut descriptor_buffer))
     .map_err(|e| format!("Error reading embedded descriptor file: {}", e))?;
@@ -1054,7 +1051,7 @@ impl Clone for VMDK {
         Self {
             descriptor_file: self.descriptor_file.clone(),
             extent_files: cloned_extent_files,
-            position: self.position.clone(),
+            position: self.position,
             descriptor_path: self.descriptor_path.clone(),
         }
     }
@@ -1231,12 +1228,12 @@ impl VMDK {
         let mut descriptor_path = PathBuf::new();
         descriptor_path.push(file_path);
 
-        return Ok(VMDK {
+        Ok(VMDK {
             descriptor_file,
             extent_files,
             position: 0,
             descriptor_path,
-        });
+        })
     }
 
     /// Reads data from the VMDK descriptor and prints metadata to the console.
@@ -1277,7 +1274,7 @@ impl VMDK {
     pub fn vmdk_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         // First, identify the extent file(s) that contains the data at the desired position
         let buf_len = buf.len() as u64;
-        let mut extent_files = self.extent_files.iter_mut().filter(|e| {
+        let extent_files = self.extent_files.iter_mut().filter(|e| {
             (
                 // We want the file that contains the starting position
                 self.position >= e.extent_description.extent_start_sector.unwrap_or(0) * SECTOR_SIZE
@@ -1304,39 +1301,27 @@ impl VMDK {
         });
 
         let mut total_read = 0;
-        while let Some(extent) = extent_files.next() {
+        for extent in extent_files {
             // Find the relative position within the extent file we want depending on the structure of the extent files we recovered
             let end_of_extent = (extent.extent_description.extent_start_sector.unwrap_or(0)
                 + extent.extent_description.sector_number)
                 * SECTOR_SIZE;
             let start_of_extent =
                 extent.extent_description.extent_start_sector.unwrap_or(0) * SECTOR_SIZE;
-            let start_position = if self.position >= start_of_extent {
-                self.position - start_of_extent
-            } else {
-                0
-            };
+            let start_position = self.position.saturating_sub(start_of_extent);
             let end_position = if self.position + (buf.len() as u64) >= end_of_extent {
                 end_of_extent - start_of_extent
             } else {
                 self.position + (buf.len() as u64) - start_of_extent
             };
             // Now, read the data from the extent file and update the buffer
-            let buffer_start = if start_of_extent <= self.position {
-                0
-            } else {
-                start_of_extent - self.position
-            };
+            let buffer_start = start_of_extent.saturating_sub(self.position);
             let buffer_end = (buffer_start + end_position - start_position) as usize;
             let buf_part = &mut buf[buffer_start as usize..buffer_end];
-            let read_result = extent.read_data(start_position, buf_part);
-            if let Ok(read_bytes) = read_result {
-                total_read += read_bytes;
-            } else {
-                return read_result;
-            }
+            let read_bytes = extent.read_data(start_position, buf_part)?;
+            total_read += read_bytes;
         }
-        self.position = self.position + total_read as u64;
+        self.position += total_read as u64;
         Ok(total_read)
     }
 
@@ -1361,44 +1346,44 @@ impl VMDK {
                 SeekFrom::Start(offset) => {
                     if offset <= total_bytes {
                         self.position = offset;
-                        return Ok(offset);
+                        Ok(offset)
                     } else {
-                        return Err(io::Error::new(
+                        Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "Offset is out of bounds",
-                        ));
+                        ))
                     }
                 }
                 SeekFrom::Current(offset) => {
                     let new_position = self.position.checked_add_signed(offset);
                     if new_position.is_some() && new_position.unwrap_or(u64::MAX) <= total_bytes {
                         self.position = new_position.unwrap_or(0);
-                        return Ok(self.position);
+                        Ok(self.position)
                     } else {
-                        return Err(io::Error::new(
+                        Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "Offset is out of bounds",
-                        ));
+                        ))
                     }
                 }
                 SeekFrom::End(offset) => {
                     let new_position = total_bytes.checked_add_signed(offset);
                     if new_position.is_some() && new_position.unwrap_or(u64::MAX) <= total_bytes {
                         self.position = new_position.unwrap_or(0);
-                        return Ok(self.position);
+                        Ok(self.position)
                     } else {
-                        return Err(io::Error::new(
+                        Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
                             "Offset is out of bounds",
-                        ));
+                        ))
                     }
                 }
             }
         } else {
-            return Err(io::Error::new(
+            Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "No extent descriptions found",
-            ));
+            ))
         }
     }
 

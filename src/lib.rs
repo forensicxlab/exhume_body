@@ -235,16 +235,16 @@ impl Body {
         match RAW::new(file_path) {
             Ok(evidence) => {
                 info!("Detected RAW Data");
-                return BodyFormat::RAW {
+                BodyFormat::RAW {
                     image: evidence,
                     description: "Raw image format".to_string(),
-                };
+                }
             }
             Err(err) => {
                 error!("Error opening data: {}", err);
                 std::process::exit(1);
             }
-        };
+        }
     }
 }
 

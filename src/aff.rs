@@ -117,8 +117,7 @@ impl AFF {
     /// page index, and extracts metadata (`pagesize`, `imagesize`, `sectorsize`).
     pub fn new(file_path: &str) -> Result<AFF, String> {
         let path = Path::new(file_path);
-        let mut file =
-            File::open(path).map_err(|e| format!("Error opening AFF image: {}", e))?;
+        let mut file = File::open(path).map_err(|e| format!("Error opening AFF image: {}", e))?;
 
         // --- Validate file header ---
         let mut header = [0u8; 8];
@@ -153,8 +152,8 @@ impl AFF {
                 .map_err(|e| format!("Error reading segment name_len: {}", e))?;
             let data_len = read_be_u32(&mut file)
                 .map_err(|e| format!("Error reading segment data_len: {}", e))?;
-            let flag = read_be_u32(&mut file)
-                .map_err(|e| format!("Error reading segment flag: {}", e))?;
+            let flag =
+                read_be_u32(&mut file).map_err(|e| format!("Error reading segment flag: {}", e))?;
 
             // Read segment name.
             let mut name_buf = vec![0u8; name_len as usize];
@@ -255,7 +254,12 @@ impl AFF {
         let ps = page_size.unwrap_or(AFF_DEFAULT_PAGE_SIZE);
         let is = image_size.unwrap_or_else(|| pages.len() as u64 * ps as u64);
 
-        info!("AFF: parsed {} pages, pagesize={}, imagesize={}", pages.len(), ps, is);
+        info!(
+            "AFF: parsed {} pages, pagesize={}, imagesize={}",
+            pages.len(),
+            ps,
+            is
+        );
 
         Ok(AFF {
             file,
@@ -294,7 +298,11 @@ impl AFF {
         if page_num >= self.pages.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("page{} is out of range (have {})", page_num, self.pages.len()),
+                format!(
+                    "page{} is out of range (have {})",
+                    page_num,
+                    self.pages.len()
+                ),
             ));
         }
 
@@ -414,10 +422,7 @@ impl Seek for AFF {
                     self.position
                         .checked_sub(delta.unsigned_abs())
                         .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "Cannot seek before start",
-                            )
+                            io::Error::new(io::ErrorKind::InvalidInput, "Cannot seek before start")
                         })?
                 }
             }
@@ -430,10 +435,7 @@ impl Seek for AFF {
                     self.image_size
                         .checked_sub(delta.unsigned_abs())
                         .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "Cannot seek before start",
-                            )
+                            io::Error::new(io::ErrorKind::InvalidInput, "Cannot seek before start")
                         })?
                 }
             }

@@ -139,13 +139,13 @@ impl EwfVolumeSection {
         let mut total_sector_count = [0u8; 4];
 
         file.seek(SeekFrom::Start(offset + 4)).unwrap();
-        file.read(&mut chunk_count).unwrap();
+        file.read_exact(&mut chunk_count).unwrap();
         file.seek(SeekFrom::Start(offset + 8)).unwrap();
-        file.read(&mut sector_per_chunk).unwrap();
+        file.read_exact(&mut sector_per_chunk).unwrap();
         file.seek(SeekFrom::Start(offset + 12)).unwrap();
-        file.read(&mut bytes_per_sector).unwrap();
+        file.read_exact(&mut bytes_per_sector).unwrap();
         file.seek(SeekFrom::Start(offset + 16)).unwrap();
-        file.read(&mut total_sector_count).unwrap();
+        file.read_exact(&mut total_sector_count).unwrap();
 
         Self {
             chunk_count: u32::from_le_bytes(chunk_count),
@@ -215,13 +215,13 @@ impl EwfSectionDescriptor {
         let mut checksum = [0u8; 4];
 
         file.seek(SeekFrom::Start(offset)).unwrap();
-        file.read(&mut section_type_def).unwrap();
+        file.read_exact(&mut section_type_def).unwrap();
         file.seek(SeekFrom::Start(offset + 16)).unwrap();
-        file.read(&mut next_section_offset).unwrap();
+        file.read_exact(&mut next_section_offset).unwrap();
         file.seek(SeekFrom::Start(offset + 24)).unwrap();
-        file.read(&mut section_size).unwrap();
+        file.read_exact(&mut section_size).unwrap();
         file.seek(SeekFrom::Start(offset + 104)).unwrap();
-        file.read(&mut checksum).unwrap();
+        file.read_exact(&mut checksum).unwrap();
 
         let mut section_type = String::from_utf8(section_type_def.to_vec()).unwrap();
         section_type.retain(|c| c != '\0');
@@ -244,7 +244,7 @@ impl EwfHeaderSection {
         if let Ok(txt) = String::from_utf8(raw.to_vec()) {
             return txt;
         }
-        if raw.len() % 2 == 0 {
+        if raw.len().is_multiple_of(2) {
             let utf16: Vec<u16> = raw
                 .chunks_exact(2)
                 .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -275,7 +275,7 @@ impl EwfHeaderSection {
     fn parse_metadata(raw: &[u8]) -> HashMap<String, String> {
         let txt = Self::decode(raw);
         let mut lines: Vec<&str> = txt
-            .split(|c| c == '\n' || c == '\r')
+            .split(['\n', '\r'])
             .filter(|l| !l.trim().is_empty())
             .collect();
 
@@ -333,7 +333,7 @@ impl EWF {
     ///
     /// *Example* – reading from the very first segment:
     /// ```no_run
-    /// # use my_crate::EWF;
+    /// # use exhume_body::ewf::EWF;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut ewf = EWF::new("/evidence/disk.E01")?;
     /// # Ok(())
@@ -438,7 +438,7 @@ impl EWF {
         let mut chunks = Vec::new();
         let mut buffer = [0u8; 4];
         file.seek(SeekFrom::Start(offset)).unwrap();
-        file.read(&mut buffer).unwrap();
+        file.read_exact(&mut buffer).unwrap();
         let entry_count = u32::from_le_bytes(buffer);
 
         let mut buffer_u64 = [0u8; 8];
@@ -446,7 +446,7 @@ impl EWF {
         file.read_exact(&mut buffer_u64).unwrap();
         let table_base_offset = u64::from_le_bytes(buffer_u64);
 
-        file.read(&mut buffer).unwrap(); // checksum – ignored
+        file.read_exact(&mut buffer).unwrap(); // checksum – ignored
 
         file.seek(SeekFrom::Start(offset + 24)).unwrap();
         let mut entry_buffer = vec![0u8; entry_count as usize * 4];
