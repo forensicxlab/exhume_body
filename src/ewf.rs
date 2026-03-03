@@ -220,7 +220,7 @@ impl EwfSectionDescriptor {
         file.read_exact(&mut next_section_offset).unwrap();
         file.seek(SeekFrom::Start(offset + 24)).unwrap();
         file.read_exact(&mut section_size).unwrap();
-        file.seek(SeekFrom::Start(offset + 104)).unwrap();
+        file.seek(SeekFrom::Start(offset + 72)).unwrap();
         file.read_exact(&mut checksum).unwrap();
 
         let mut section_type = String::from_utf8(section_type_def.to_vec()).unwrap();
