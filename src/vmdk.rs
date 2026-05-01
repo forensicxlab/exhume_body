@@ -1390,6 +1390,16 @@ impl VMDK {
     pub fn get_sector_size(&self) -> u64 {
         SECTOR_SIZE
     }
+
+    /// Returns the logical size of the disk image in bytes (sum of all extent sectors × 512).
+    pub fn get_image_size(&self) -> u64 {
+        self.descriptor_file
+            .extent_descriptions
+            .iter()
+            .map(|e| e.sector_number)
+            .sum::<u64>()
+            * SECTOR_SIZE
+    }
 }
 
 impl Read for VMDK {

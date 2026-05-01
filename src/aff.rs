@@ -291,6 +291,11 @@ impl AFF {
         self.sector_size
     }
 
+    /// Returns the logical (uncompressed) size of the disk image in bytes.
+    pub fn get_image_size(&self) -> u64 {
+        self.image_size
+    }
+
     // ---- Internal page reading ----------------------------------------------
 
     /// Read and (if necessary) decompress a single page into memory.

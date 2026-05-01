@@ -62,6 +62,11 @@ impl RAW {
     pub fn seek_from_start(&mut self, offset: u64) -> io::Result<u64> {
         self.file.seek(SeekFrom::Start(offset))
     }
+
+    /// Returns the size of the underlying raw file in bytes.
+    pub fn get_image_size(&self) -> u64 {
+        self.file.metadata().map(|m| m.len()).unwrap_or(0)
+    }
 }
 
 impl Clone for RAW {

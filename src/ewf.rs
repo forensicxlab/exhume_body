@@ -427,6 +427,12 @@ impl EWF {
         self.volume.bytes_per_sector as u16
     }
 
+    /// Returns the logical size of the disk image in bytes.
+    #[inline]
+    pub fn get_image_size(&self) -> u64 {
+        self.volume.total_sector_count as u64 * self.volume.bytes_per_sector as u64
+    }
+
     // ---------------------------------------------------------------------
     // Internal helpers (parsing & IO glue). Nothing below this point is part
     // of the public API.

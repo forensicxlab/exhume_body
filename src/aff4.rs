@@ -83,12 +83,65 @@ struct Aff4Interval {
     target_offset: u64,
 }
 
-/// Cache holds the last decoded chunk (simple, effective).
+const CHUNK_CACHE_CAPACITY: usize = 64;
+
+/// LRU cache of decoded chunks. `data` always holds the most-recently-used chunk for
+/// direct use in the read loop; `lru` holds up to CHUNK_CACHE_CAPACITY-1 older entries.
 #[derive(Clone, Default)]
 struct ChunkCache {
     member: String,
     chunk_index: u32,
     data: Vec<u8>,
+    lru: std::collections::VecDeque<(String, u32, Vec<u8>)>,
+}
+
+impl ChunkCache {
+    fn is_current(&self, member: &str, chunk_index: u32) -> bool {
+        !self.data.is_empty() && self.member == member && self.chunk_index == chunk_index
+    }
+
+    /// Promotes a cached entry to `current`. Returns true on hit.
+    fn promote(&mut self, member: &str, chunk_index: u32) -> bool {
+        if let Some(pos) = self
+            .lru
+            .iter()
+            .position(|(m, c, _)| m == member && *c == chunk_index)
+        {
+            let (m, c, d) = self.lru.remove(pos).unwrap();
+            if !self.data.is_empty() {
+                let old = (
+                    std::mem::take(&mut self.member),
+                    self.chunk_index,
+                    std::mem::take(&mut self.data),
+                );
+                self.lru.push_front(old);
+            }
+            self.member = m;
+            self.chunk_index = c;
+            self.data = d;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Stores a newly decoded chunk as current, demoting the old current to the LRU.
+    fn store(&mut self, member: String, chunk_index: u32, data: Vec<u8>) {
+        if !self.data.is_empty() {
+            let old = (
+                std::mem::take(&mut self.member),
+                self.chunk_index,
+                std::mem::take(&mut self.data),
+            );
+            self.lru.push_front(old);
+            if self.lru.len() >= CHUNK_CACHE_CAPACITY {
+                self.lru.pop_back();
+            }
+        }
+        self.member = member;
+        self.chunk_index = chunk_index;
+        self.data = data;
+    }
 }
 
 // -----------------------------
@@ -303,6 +356,11 @@ impl AFF4 {
 
     pub fn get_sector_size(&self) -> u16 {
         512
+    }
+
+    /// Returns the logical (uncompressed) size of the disk image in bytes.
+    pub fn get_image_size(&self) -> u64 {
+        self.image_size
     }
 }
 
@@ -1003,10 +1061,10 @@ impl AFF4 {
 
 impl AFF4 {
     fn load_chunk_into_cache(&mut self, member: &str, chunk_index: u32) -> io::Result<()> {
-        if self.cache.member == member
-            && self.cache.chunk_index == chunk_index
-            && !self.cache.data.is_empty()
-        {
+        if self.cache.is_current(member, chunk_index) {
+            return Ok(());
+        }
+        if self.cache.promote(member, chunk_index) {
             return Ok(());
         }
 
@@ -1097,9 +1155,7 @@ impl AFF4 {
             }
         };
 
-        self.cache.member = member.to_string();
-        self.cache.chunk_index = chunk_index;
-        self.cache.data = decoded;
+        self.cache.store(member.to_string(), chunk_index, decoded);
 
         Ok(())
     }

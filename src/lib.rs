@@ -180,6 +180,20 @@ impl Body {
         }
     }
 
+    /// Returns the logical (uncompressed) size of the disk image in bytes.
+    ///
+    /// For compressed formats (AFF4, EWF, AFF) this is the declared logical size from
+    /// the image metadata, not the size of the container file on disk.
+    pub fn get_image_size(&self) -> u64 {
+        match &self.format {
+            BodyFormat::EWF { image, .. } => image.get_image_size(),
+            BodyFormat::VMDK { image, .. } => image.get_image_size(),
+            BodyFormat::RAW { image, .. } => image.get_image_size(),
+            BodyFormat::AFF { image, .. } => image.get_image_size(),
+            BodyFormat::AFF4 { image, .. } => image.get_image_size(),
+        }
+    }
+
     /// Returns a reference to the format description.
     pub fn format_description(&self) -> &str {
         match &self.format {
