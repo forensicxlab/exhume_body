@@ -552,7 +552,8 @@ impl FromStr for VMDKDescriptorFile {
         Ok(VMDKDescriptorFile {
             header: VMDKHeader::try_from(file_header_hashmap)?,
             extent_descriptions,
-            change_tracking_file: change_track_path.map(|change_track_path| VMDKChangeTrackingSection { change_track_path }),
+            change_tracking_file: change_track_path
+                .map(|change_track_path| VMDKChangeTrackingSection { change_track_path }),
             disk_database: VMDKDiskDatabase::try_from(ddb_hashmap).ok(),
         })
     }
@@ -659,7 +660,9 @@ impl VMDKSparseExtentMetadata {
     fn read_from_file(file: &mut File, header: &VMDKSparseFileHeader) -> Result<Self, String> {
         let mut grain_directory_entry_count: u64 =
             header.capacity / (header.number_of_grain_table_entries as u64 * header.grain_number);
-        if !header.capacity.is_multiple_of(header.number_of_grain_table_entries as u64 * header.grain_number)
+        if !header
+            .capacity
+            .is_multiple_of(header.number_of_grain_table_entries as u64 * header.grain_number)
         {
             grain_directory_entry_count += 1
         }
@@ -745,9 +748,10 @@ fn read_sparse_extent(
             *sparse_metadata
                 .grain_directory
                 .get(grain as usize)
-                .ok_or(io::Error::other(
-                    format!("Grain directory entry not found: {}", grain),
-                ))?;
+                .ok_or(io::Error::other(format!(
+                    "Grain directory entry not found: {}",
+                    grain
+                )))?;
         if sector_number == 0 {
             // The grain is sparse
             let remaining_buffer_size = buf.len() - read_size;
@@ -846,6 +850,8 @@ struct VMDKExtentFile {
     extent_description: VMDKExtentDescriptor,
     /// The file handle for the extent file
     file: File,
+    /// Canonical path of the opened extent file.
+    path: PathBuf,
     /// Metadata for sparse extent files, Some if this is a sparse extent file
     sparse_extent_metadata: Option<VMDKSparseExtentMetadata>,
 }
@@ -1031,22 +1037,18 @@ impl Clone for VMDK {
     fn clone(&self) -> Self {
         let mut cloned_extent_files = Vec::new();
         for extent_file in &self.extent_files {
-            if let Some(ref file_name) = extent_file.extent_description.extent_file_name {
-                let extent_file_path = self
-                    .descriptor_path
-                    .parent()
-                    .unwrap_or(Path::new(""))
-                    .join(Path::new(file_name));
-                let file = File::open(extent_file_path);
-                // FIXME: even if it is highly unlikely that and error occurs, we should not silence it if it happens
-                if let Ok(file) = file {
-                    cloned_extent_files.push(VMDKExtentFile {
-                        extent_description: extent_file.extent_description.clone(),
-                        file,
-                        sparse_extent_metadata: extent_file.sparse_extent_metadata.clone(),
-                    });
-                }
-            }
+            let file = File::open(&extent_file.path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to duplicate VMDK extent {}: {error}",
+                    extent_file.path.display()
+                )
+            });
+            cloned_extent_files.push(VMDKExtentFile {
+                extent_description: extent_file.extent_description.clone(),
+                file,
+                path: extent_file.path.clone(),
+                sparse_extent_metadata: extent_file.sparse_extent_metadata.clone(),
+            });
         }
         Self {
             descriptor_file: self.descriptor_file.clone(),
@@ -1068,8 +1070,11 @@ impl VMDK {
     pub fn new(file_path: &str) -> Result<VMDK, String> {
         debug!("Opening and reading VMDK descriptor file: {}", file_path);
 
-        let mut vmdk_file =
-            File::open(file_path).map_err(|e| format!("Error reading descriptor file: {}", e))?;
+        let descriptor_path = Path::new(file_path)
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve VMDK descriptor path {file_path}: {error}"))?;
+        let mut vmdk_file = File::open(&descriptor_path)
+            .map_err(|e| format!("Error reading descriptor file: {}", e))?;
         let file_len = vmdk_file
             .metadata()
             .map_err(|e| format!("stat failed: {}", e))?
@@ -1160,7 +1165,7 @@ impl VMDK {
             // So we just make sure that the file path is set correctly
             for extent in &mut descriptor_file.extent_descriptions {
                 extent.set_path(
-                    Path::new(file_path)
+                    descriptor_path
                         .file_name()
                         .unwrap_or(OsStr::new(""))
                         .to_str()
@@ -1172,61 +1177,80 @@ impl VMDK {
 
         debug!("Opening VMDK extent files if any");
         // Try to open all the identified extent files and add them to the VMDK object
-        let extent_files: Vec<VMDKExtentFile> = descriptor_file
-            .extent_descriptions
-            .iter()
-            .filter_map(|extent| {
-                if let Some(ref extent_file_name) = extent.extent_file_name {
-                    // Ensure the path read in the descriptor file is treated as a path relative to the descriptor file
-                    // Note: the specification of VMDK does not prohibit absolute paths in the extent file name but this case is considered as
-                    // unlikely and impractical in a forensic context. This code may be corrected if the case happens in the real world.
-                    let extent_file_path = Path::new(file_path)
-                        .parent()
-                        .unwrap_or(Path::new(""))
-                        .join(extent_file_name);
-                    debug!("Opening extent file: {}", extent_file_path.display());
-                    let mut file = File::open(extent_file_path).ok()?;
-                    let sparse_extent_metadata = if extent.extent_type == VMDKExtentType::Sparse {
-                        if sparse_header.is_none()
-                            || descriptor_file.header.create_type == VMDKDiskType::StreamOptimized
-                        {
-                            if sparse_header.is_some()
-                                && descriptor_file.header.create_type
-                                    == VMDKDiskType::StreamOptimized
-                                && sparse_header.as_ref().unwrap().grain_directory_sector == -1
-                            {
-                                // StreamOptimized disks usually have their header at the end of the file
-                                file.seek(SeekFrom::End(-1024)).ok()?;
-                            } else {
-                                file.seek(SeekFrom::Start(0)).ok()?;
-                            }
-                            let mut header_data = [0u8; 80];
-                            sparse_header = match file.read(&mut header_data) {
-                                Ok(_) => Some(
-                                    VMDKSparseFileHeader::parse_sparse_header(&header_data).ok()?,
-                                ),
-                                Err(_) => return None,
-                            };
-                        }
-                        debug!("Parsed header: {:?}", sparse_header);
-                        VMDKSparseExtentMetadata::read_from_file(&mut file, sparse_header.as_ref()?)
-                            .ok()
+        let mut extent_files = Vec::new();
+        for extent in &descriptor_file.extent_descriptions {
+            if extent.extent_type == VMDKExtentType::Zero {
+                continue;
+            }
+            let extent_file_name = extent.extent_file_name.as_ref().ok_or_else(|| {
+                format!(
+                    "VMDK {:?} extent at sector {} has no backing filename",
+                    extent.extent_type,
+                    extent.extent_start_sector.unwrap_or(0)
+                )
+            })?;
+            let declared_path = Path::new(extent_file_name);
+            let joined_path = if declared_path.is_absolute() {
+                declared_path.to_path_buf()
+            } else {
+                descriptor_path
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(declared_path)
+            };
+            let extent_file_path = joined_path.canonicalize().map_err(|error| {
+                format!(
+                    "cannot resolve VMDK extent {} declared by {}: {error}",
+                    joined_path.display(),
+                    descriptor_path.display()
+                )
+            })?;
+            debug!("Opening extent file: {}", extent_file_path.display());
+            let mut file = File::open(&extent_file_path).map_err(|error| {
+                format!(
+                    "cannot open VMDK extent {}: {error}",
+                    extent_file_path.display()
+                )
+            })?;
+            let sparse_extent_metadata = if extent.extent_type == VMDKExtentType::Sparse {
+                if sparse_header.is_none()
+                    || descriptor_file.header.create_type == VMDKDiskType::StreamOptimized
+                {
+                    if sparse_header.is_some()
+                        && descriptor_file.header.create_type == VMDKDiskType::StreamOptimized
+                        && sparse_header.as_ref().unwrap().grain_directory_sector == -1
+                    {
+                        file.seek(SeekFrom::End(-1024)).map_err(|error| {
+                            format!("cannot seek VMDK sparse extent header: {error}")
+                        })?;
                     } else {
-                        None
-                    };
-                    Some(VMDKExtentFile {
-                        extent_description: extent.clone(),
-                        file,
-                        sparse_extent_metadata,
-                    })
-                } else {
-                    None
+                        file.seek(SeekFrom::Start(0)).map_err(|error| {
+                            format!("cannot seek VMDK sparse extent header: {error}")
+                        })?;
+                    }
+                    let mut header_data = [0u8; 80];
+                    file.read_exact(&mut header_data).map_err(|error| {
+                        format!("cannot read VMDK sparse extent header: {error}")
+                    })?;
+                    sparse_header = Some(VMDKSparseFileHeader::parse_sparse_header(&header_data)?);
                 }
-            })
-            .collect();
-
-        let mut descriptor_path = PathBuf::new();
-        descriptor_path.push(file_path);
+                debug!("Parsed header: {:?}", sparse_header);
+                Some(VMDKSparseExtentMetadata::read_from_file(
+                    &mut file,
+                    sparse_header.as_ref().ok_or_else(|| {
+                        "VMDK sparse extent has no parsed sparse header".to_owned()
+                    })?,
+                )?)
+            } else {
+                None
+            };
+            extent_files.push(VMDKExtentFile {
+                extent_description: extent.clone(),
+                file,
+                path: extent_file_path,
+                sparse_extent_metadata,
+            });
+        }
 
         Ok(VMDK {
             descriptor_file,
@@ -1234,6 +1258,16 @@ impl VMDK {
             position: 0,
             descriptor_path,
         })
+    }
+
+    /// Canonical paths for the descriptor/container and every opened extent.
+    pub fn backing_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::with_capacity(self.extent_files.len() + 1);
+        paths.push(self.descriptor_path.clone());
+        paths.extend(self.extent_files.iter().map(|extent| extent.path.clone()));
+        paths.sort();
+        paths.dedup();
+        paths
     }
 
     /// Reads data from the VMDK descriptor and prints metadata to the console.
@@ -1417,6 +1451,7 @@ impl Seek for VMDK {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_parse_key_value_pair() {
@@ -1495,5 +1530,66 @@ ddb.toolsVersion = "0"
             descriptor.disk_database.unwrap().ddb_geometry_cylinders,
             Some(16383)
         );
+    }
+
+    #[test]
+    fn backing_paths_include_descriptor_and_every_flat_extent() {
+        let directory = tempfile::tempdir().unwrap();
+        let descriptor_path = directory.path().join("disk.vmdk");
+        let first_extent = directory.path().join("disk-f001.vmdk");
+        let second_extent = directory.path().join("disk-f002.vmdk");
+        fs::write(&first_extent, vec![0x11; 512]).unwrap();
+        fs::write(&second_extent, vec![0x22; 512]).unwrap();
+        fs::write(
+            &descriptor_path,
+            r#"# Disk DescriptorFile
+version=1
+encoding="UTF-8"
+CID=123a5678
+parentCID=ffffffff
+createType="2GbMaxExtentFlat"
+
+# Extent description
+RW 1 FLAT "disk-f001.vmdk" 0
+RW 1 FLAT "disk-f002.vmdk" 0
+"#,
+        )
+        .unwrap();
+
+        let vmdk = VMDK::new(descriptor_path.to_str().unwrap()).unwrap();
+        let mut expected = vec![
+            descriptor_path.canonicalize().unwrap(),
+            first_extent.canonicalize().unwrap(),
+            second_extent.canonicalize().unwrap(),
+        ];
+        expected.sort();
+        assert_eq!(vmdk.backing_paths(), expected);
+    }
+
+    #[test]
+    fn missing_declared_extent_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let descriptor_path = directory.path().join("disk.vmdk");
+        fs::write(
+            &descriptor_path,
+            r#"# Disk DescriptorFile
+version=1
+encoding="UTF-8"
+CID=123a5678
+parentCID=ffffffff
+createType="monolithicFlat"
+
+# Extent description
+RW 1 FLAT "missing-flat.vmdk" 0
+"#,
+        )
+        .unwrap();
+
+        let error = match VMDK::new(descriptor_path.to_str().unwrap()) {
+            Ok(_) => panic!("a VMDK with a missing extent must not open"),
+            Err(error) => error,
+        };
+        assert!(error.contains("cannot resolve VMDK extent"));
+        assert!(error.contains("missing-flat.vmdk"));
     }
 }

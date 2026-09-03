@@ -957,12 +957,10 @@ impl Read for AFF4 {
             let (member, seg_off) = self
                 .resolve_segment_member(&iv.target_urn, logical_off)
                 .ok_or_else(|| {
-                    io::Error::other(
-                        format!(
-                            "cannot resolve segment: base={:?} logical_off=0x{:x}",
-                            iv.target_urn, logical_off
-                        ),
-                    )
+                    io::Error::other(format!(
+                        "cannot resolve segment: base={:?} logical_off=0x{:x}",
+                        iv.target_urn, logical_off
+                    ))
                 })?;
 
             // Determine chunk index and offset inside chunk
@@ -980,13 +978,11 @@ impl Read for AFF4 {
             self.load_chunk_into_cache(&member, chunk_index)?;
 
             if within_chunk >= self.cache.data.len() {
-                return Err(io::Error::other(
-                    format!(
-                        "within_chunk=0x{:x} beyond decoded chunk size=0x{:x}",
-                        within_chunk,
-                        self.cache.data.len()
-                    ),
-                ));
+                return Err(io::Error::other(format!(
+                    "within_chunk=0x{:x} beyond decoded chunk size=0x{:x}",
+                    within_chunk,
+                    self.cache.data.len()
+                )));
             }
 
             let available = self.cache.data.len() - within_chunk;
@@ -1019,29 +1015,24 @@ impl AFF4 {
         index_member: &str,
         idx: u32,
     ) -> io::Result<IndexEntry> {
-        let z = zip.directory().get(index_member).ok_or_else(|| {
-            io::Error::other(
-                format!("missing index member {:?}", index_member),
-            )
-        })?;
+        let z = zip
+            .directory()
+            .get(index_member)
+            .ok_or_else(|| io::Error::other(format!("missing index member {:?}", index_member)))?;
 
         if z.compression_method != 0 {
-            return Err(io::Error::other(
-                format!(
-                    "index member {:?} is ZIP-compressed (unexpected)",
-                    index_member
-                ),
-            ));
+            return Err(io::Error::other(format!(
+                "index member {:?} is ZIP-compressed (unexpected)",
+                index_member
+            )));
         }
 
         let off = (idx as u64) * 12;
         if off + 12 > z.compressed_size {
-            return Err(io::Error::other(
-                format!(
-                    "index entry {} out of range: {:?} size=0x{:x}",
-                    idx, index_member, z.compressed_size
-                ),
-            ));
+            return Err(io::Error::other(format!(
+                "index entry {} out of range: {:?} size=0x{:x}",
+                idx, index_member, z.compressed_size
+            )));
         }
 
         let mut raw = [0u8; 12];
@@ -1083,31 +1074,23 @@ impl AFF4 {
         let member_len = self
             .zip_directory
             .get(member)
-            .ok_or_else(|| {
-                io::Error::other(
-                    format!("missing data member {:?}", member),
-                )
-            })?
+            .ok_or_else(|| io::Error::other(format!("missing data member {:?}", member)))?
             .compressed_size;
 
         let c_off = ent.c_off;
         let c_len = ent.c_len as u64;
 
         if c_len == 0 {
-            return Err(io::Error::other(
-                format!(
-                    "index says chunk {} has zero length (member {:?})",
-                    chunk_index, member
-                ),
-            ));
+            return Err(io::Error::other(format!(
+                "index says chunk {} has zero length (member {:?})",
+                chunk_index, member
+            )));
         }
         if c_off + c_len > member_len {
-            return Err(io::Error::other(
-                format!(
-                    "index out of bounds: chunk {} c_off=0x{:x} c_len=0x{:x} member_len=0x{:x}",
-                    chunk_index, c_off, c_len, member_len
-                ),
-            ));
+            return Err(io::Error::other(format!(
+                "index out of bounds: chunk {} c_off=0x{:x} c_len=0x{:x} member_len=0x{:x}",
+                chunk_index, c_off, c_len, member_len
+            )));
         }
 
         let mut compressed = vec![0u8; ent.c_len as usize];
@@ -1125,12 +1108,10 @@ impl AFF4 {
                     let mut out = vec![0u8; self.chunk_size as usize];
                     block::decompress_into(&compressed, &mut out).map_err(|err| {
                         let magic = compressed.get(0..4).unwrap_or(&compressed);
-                        io::Error::other(
-                            format!(
-                                "lz4 block decompress failed for chunk {}: {} (first4={:02x?})",
-                                chunk_index, err, magic
-                            ),
-                        )
+                        io::Error::other(format!(
+                            "lz4 block decompress failed for chunk {}: {} (first4={:02x?})",
+                            chunk_index, err, magic
+                        ))
                     })?;
                     out
                 }

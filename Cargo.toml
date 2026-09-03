@@ -1,11 +1,12 @@
 [package]
 name = "exhume_body"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 description = "Format-agnostic data extraction from disk images and other potential data structures."
 documentation = "https://www.forensicxlab.com/docs/category/exhume---body"
 authors = ["k1nd0ne"]
-license = "GPL-2.0-or-later"
+repository = "https://github.com/forensicxlab/exhume_body"
+license = "GPL-3.0-only"
 readme = "README.md"
 
 
@@ -22,6 +23,10 @@ snap = "1.1.1"
 log = "0.4.29"
 env_logger = "0.11.6"
 lz4_flex = "0.13.0"
+lzma-rs = { version = "0.3.0", features = ["raw_decoder"] }
 rio_turtle = "0.8"
 rio_api = "0.8"
 indicatif = "0.17"
+
+[dev-dependencies]
+tempfile = "3.26.0"

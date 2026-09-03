@@ -12,6 +12,25 @@ use raw::RAW;
 use vmdk::VMDK;
 
 use std::io::{self, Read, Seek, SeekFrom};
+use std::path::PathBuf;
+
+/// A seekable, bounded block-volume view.
+///
+/// Implementations report their logical byte length and sector size without
+/// requiring callers to probe the stream with `SeekFrom::End`.  This is the
+/// lowest-level contract used by filesystem parsers, block transforms, and
+/// streaming exporters.
+pub trait VolumeReader: Read + Seek + Send {
+    /// Logical length of this volume view in bytes.
+    fn volume_len(&self) -> u64;
+
+    /// Smallest addressable block size advertised by the source.
+    fn sector_size(&self) -> u32;
+
+    fn is_empty(&self) -> bool {
+        self.volume_len() == 0
+    }
+}
 
 #[derive(Clone)]
 pub enum BodyFormat {
@@ -48,22 +67,33 @@ impl Body {
     /// Create a new Body given a file path and a format.
     /// If the format string is "auto", the image format will be auto-detected.
     pub fn new(file_path: String, format: &str) -> Body {
+        match Self::try_new(file_path, format) {
+            Ok(body) => body,
+            Err(err) => {
+                error!("Error: {}", err);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// Try to create a new Body given a file path and a format.
+    ///
+    /// Unlike [`Body::new`], this function never terminates the calling process.
+    /// It is intended for libraries and long-running applications that need to
+    /// report missing, disconnected, or unreadable evidence back to their caller.
+    /// If the format string is "auto", the image format will be auto-detected.
+    pub fn try_new(file_path: String, format: &str) -> Result<Body, String> {
         if format == "auto" {
-            return Body {
+            return Ok(Body {
                 path: file_path.clone(),
-                format: Self::detect_format(&file_path),
-            };
+                format: Self::try_detect_format(&file_path)?,
+            });
         }
 
-        match format {
+        let body = match format {
             "ewf" => {
-                let evidence = match EWF::new(&file_path) {
-                    Ok(ewf) => ewf,
-                    Err(err) => {
-                        error!("Error: {}", err);
-                        std::process::exit(1);
-                    }
-                };
+                let evidence = EWF::new(&file_path)
+                    .map_err(|err| format!("failed to open EWF evidence '{file_path}': {err}"))?;
                 Body {
                     path: file_path,
                     format: BodyFormat::EWF {
@@ -73,13 +103,8 @@ impl Body {
                 }
             }
             "vmdk" => {
-                let evidence = match VMDK::new(&file_path) {
-                    Ok(evidence) => evidence,
-                    Err(err) => {
-                        error!("Error: {}", err);
-                        std::process::exit(1);
-                    }
-                };
+                let evidence = VMDK::new(&file_path)
+                    .map_err(|err| format!("failed to open VMDK evidence '{file_path}': {err}"))?;
                 Body {
                     path: file_path,
                     format: BodyFormat::VMDK {
@@ -89,13 +114,8 @@ impl Body {
                 }
             }
             "raw" => {
-                let evidence = match RAW::new(&file_path) {
-                    Ok(evidence) => evidence,
-                    Err(err) => {
-                        error!("Error: {}", err);
-                        std::process::exit(1);
-                    }
-                };
+                let evidence = RAW::new(&file_path)
+                    .map_err(|err| format!("failed to open raw evidence '{file_path}': {err}"))?;
                 Body {
                     path: file_path,
                     format: BodyFormat::RAW {
@@ -105,13 +125,8 @@ impl Body {
                 }
             }
             "aff" => {
-                let evidence = match AFF::new(&file_path) {
-                    Ok(evidence) => evidence,
-                    Err(err) => {
-                        error!("Error: {}", err);
-                        std::process::exit(1);
-                    }
-                };
+                let evidence = AFF::new(&file_path)
+                    .map_err(|err| format!("failed to open AFF evidence '{file_path}': {err}"))?;
                 Body {
                     path: file_path,
                     format: BodyFormat::AFF {
@@ -121,13 +136,8 @@ impl Body {
                 }
             }
             "aff4" | "aff4l" => {
-                let evidence = match AFF4::new(&file_path) {
-                    Ok(a) => a,
-                    Err(err) => {
-                        error!("Error: {}", err);
-                        std::process::exit(1);
-                    }
-                };
+                let evidence = AFF4::new(&file_path)
+                    .map_err(|err| format!("failed to open AFF4 evidence '{file_path}': {err}"))?;
                 Body {
                     path: file_path,
                     format: BodyFormat::AFF4 {
@@ -137,13 +147,13 @@ impl Body {
                 }
             }
             _ => {
-                error!(
-                    "Error: Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff', 'aff4' or 'auto'.",
-                    format
-                );
-                std::process::exit(1);
+                return Err(format!(
+                    "invalid format '{format}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff', 'aff4' or 'auto'"
+                ));
             }
-        }
+        };
+
+        Ok(body)
     }
 
     pub fn new_from(file_path: String, format: &str, offset: Option<u64>) -> Body {
@@ -206,59 +216,139 @@ impl Body {
         }
     }
 
+    /// Canonical paths of every file that backs this evidence stream.
+    ///
+    /// Multi-segment EWF images and descriptor-based VMDKs can read files other
+    /// than the path supplied to [`Body::try_new`]. Exporters must protect every
+    /// returned path from output/staging collisions and bind resumable work to
+    /// metadata for the complete set.
+    pub fn backing_paths(&self) -> Result<Vec<PathBuf>, String> {
+        let mut paths = match &self.format {
+            BodyFormat::EWF { image, .. } => image.backing_paths().to_vec(),
+            BodyFormat::VMDK { image, .. } => image.backing_paths(),
+            BodyFormat::RAW { .. } | BodyFormat::AFF { .. } | BodyFormat::AFF4 { .. } => {
+                vec![PathBuf::from(&self.path).canonicalize().map_err(|error| {
+                    format!(
+                        "cannot resolve evidence backing path {}: {error}",
+                        self.path
+                    )
+                })?]
+            }
+        };
+        if paths.is_empty() {
+            return Err("evidence body has no backing files".to_owned());
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     /// Detect the image format by attempting to create each format.
     /// Currently, tries EWF first then falls back to RAW.
-    fn detect_format(file_path: &str) -> BodyFormat {
+    fn try_detect_format(file_path: &str) -> Result<BodyFormat, String> {
         // Try EWF detection first.
         if let Ok(evidence) = EWF::new(file_path) {
             info!("Detected an EWF disk image.");
-            return BodyFormat::EWF {
+            return Ok(BodyFormat::EWF {
                 image: evidence,
                 description: "Expert Witness Compression Format (EWF)".to_string(),
-            };
+            });
         }
 
         // Then try VMDK detection.
         if let Ok(evidence) = VMDK::new(file_path) {
             info!("Detected a VMDK disk image.");
-            return BodyFormat::VMDK {
+            return Ok(BodyFormat::VMDK {
                 image: evidence,
                 description: "VMDK (Virtual Machine Disk) file".to_string(),
-            };
+            });
         }
 
         // Then try AFF detection.
         if let Ok(evidence) = AFF::new(file_path) {
             info!("Detected an AFF disk image.");
-            return BodyFormat::AFF {
+            return Ok(BodyFormat::AFF {
                 image: evidence,
                 description: "Advanced Forensics Format (AFF)".to_string(),
-            };
+            });
         }
 
         // Then try AFF4 detection.
         if let Ok(evidence) = AFF4::new(file_path) {
             info!("Detected an AFF4/AFF4-L volume (ImageStream).");
-            return BodyFormat::AFF4 {
+            return Ok(BodyFormat::AFF4 {
                 image: evidence,
                 description: "AFF4 / AFF4-L (ImageStream)".to_string(),
-            };
+            });
         }
 
         // Default to RAW.
         match RAW::new(file_path) {
             Ok(evidence) => {
                 info!("Detected RAW Data");
-                BodyFormat::RAW {
+                Ok(BodyFormat::RAW {
                     image: evidence,
                     description: "Raw image format".to_string(),
-                }
+                })
             }
-            Err(err) => {
-                error!("Error opening data: {}", err);
-                std::process::exit(1);
-            }
+            Err(err) => Err(format!("failed to open evidence '{file_path}': {err}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Body;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn missing_test_path() -> String {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "exhume-body-missing-{}-{unique}.raw",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn try_new_returns_an_error_for_a_missing_path() {
+        let path = missing_test_path();
+        let error = match Body::try_new(path.clone(), "auto") {
+            Ok(_) => panic!("a missing evidence path must not open"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains(&path));
+        assert!(error.contains("failed to open evidence"));
+    }
+
+    #[test]
+    fn try_new_propagates_an_invalid_format_error() {
+        let error = match Body::try_new(missing_test_path(), "unsupported") {
+            Ok(_) => panic!("an unsupported evidence format must not open"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("invalid format 'unsupported'"));
+    }
+
+    #[test]
+    fn raw_body_reports_its_canonical_backing_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("evidence.raw");
+        fs::write(&source, vec![0u8; 512]).unwrap();
+        let body = Body::try_new(source.to_string_lossy().into_owned(), "raw").unwrap();
+
+        assert_eq!(
+            body.backing_paths().unwrap(),
+            vec![source.canonicalize().unwrap()]
+        );
     }
 }
 
@@ -288,6 +378,16 @@ impl Seek for Body {
     }
 }
 
+impl VolumeReader for Body {
+    fn volume_len(&self) -> u64 {
+        self.get_image_size()
+    }
+
+    fn sector_size(&self) -> u32 {
+        u32::from(self.get_sector_size())
+    }
+}
+
 pub struct BodySlice {
     body: Body,
     slice_start: u64,
@@ -297,6 +397,20 @@ pub struct BodySlice {
 
 impl BodySlice {
     pub fn new(src: &Body, slice_start: u64, slice_len: u64) -> io::Result<Self> {
+        let slice_end = slice_start.checked_add(slice_len).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "slice start plus length overflows u64",
+            )
+        })?;
+        let image_len = src.get_image_size();
+        if slice_end > image_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("slice range {slice_start}..{slice_end} exceeds image length {image_len}"),
+            ));
+        }
+
         let mut body = src.clone();
         body.seek(SeekFrom::Start(slice_start))?;
         Ok(Self {
@@ -305,6 +419,29 @@ impl BodySlice {
             slice_len,
             pos: 0,
         })
+    }
+
+    /// Absolute byte offset of this slice in its parent image.
+    pub fn start(&self) -> u64 {
+        self.slice_start
+    }
+
+    /// Logical length of this slice in bytes.
+    pub fn len(&self) -> u64 {
+        self.slice_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slice_len == 0
+    }
+
+    /// Current cursor relative to the beginning of the slice.
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    pub fn sector_size(&self) -> u32 {
+        u32::from(self.body.get_sector_size())
     }
 }
 
@@ -315,6 +452,16 @@ impl Read for BodySlice {
         }
         let max = std::cmp::min(buf.len() as u64, self.slice_len - self.pos) as usize;
 
+        // Some image backends clone OS file handles whose physical cursor may
+        // be shared. Reassert this slice's logical cursor before every read so
+        // independently cloned slices cannot move one another unexpectedly.
+        let absolute = self.slice_start.checked_add(self.pos).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "absolute read position overflow",
+            )
+        })?;
+        self.body.seek(SeekFrom::Start(absolute))?;
         let n = self.body.read(&mut buf[..max])?;
         self.pos += n as u64;
         Ok(n)
@@ -325,8 +472,8 @@ impl Seek for BodySlice {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let new_pos = match pos {
             SeekFrom::Start(off) => off,
-            SeekFrom::Current(off) => (self.pos as i64 + off) as u64,
-            SeekFrom::End(off) => (self.slice_len as i64 + off) as u64,
+            SeekFrom::Current(off) => checked_offset(self.pos, off)?,
+            SeekFrom::End(off) => checked_offset(self.slice_len, off)?,
         };
 
         if new_pos > self.slice_len {
@@ -336,23 +483,143 @@ impl Seek for BodySlice {
             ));
         }
 
-        self.body
-            .seek(SeekFrom::Start(self.slice_start + new_pos))?;
+        let absolute = self.slice_start.checked_add(new_pos).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "absolute seek position overflow",
+            )
+        })?;
+        self.body.seek(SeekFrom::Start(absolute))?;
         self.pos = new_pos;
         Ok(self.pos)
     }
 }
 
+fn checked_offset(base: u64, offset: i64) -> io::Result<u64> {
+    let target = if offset >= 0 {
+        base.checked_add(offset as u64)
+    } else {
+        base.checked_sub(offset.unsigned_abs())
+    };
+    target.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "seek position is before start or overflows u64",
+        )
+    })
+}
+
+impl VolumeReader for BodySlice {
+    fn volume_len(&self) -> u64 {
+        self.slice_len
+    }
+
+    fn sector_size(&self) -> u32 {
+        BodySlice::sector_size(self)
+    }
+}
+
 impl Clone for BodySlice {
     fn clone(&self) -> Self {
-        let mut body = self.body.clone();
-        // replicate cursor state
-        body.seek(SeekFrom::Start(self.slice_start + self.pos)).ok();
         Self {
-            body,
+            body: self.body.clone(),
             slice_start: self.slice_start,
             slice_len: self.slice_len,
             pos: self.pos,
         }
+    }
+}
+
+#[cfg(test)]
+mod body_slice_tests {
+    use super::{Body, BodySlice, VolumeReader};
+    use std::fs;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestImage {
+        path: String,
+    }
+
+    impl TestImage {
+        fn new(bytes: &[u8]) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir()
+                .join(format!(
+                    "exhume-body-slice-{}-{unique}.raw",
+                    std::process::id()
+                ))
+                .to_string_lossy()
+                .into_owned();
+            fs::write(&path, bytes).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TestImage {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn slice_rejects_overflow_and_ranges_beyond_image() {
+        let image = TestImage::new(&[0; 1024]);
+        let body = Body::try_new(image.path.clone(), "raw").unwrap();
+
+        assert!(BodySlice::new(&body, u64::MAX, 2).is_err());
+        assert!(BodySlice::new(&body, 512, 513).is_err());
+        assert!(BodySlice::new(&body, 1025, 0).is_err());
+    }
+
+    #[test]
+    fn slice_reads_exact_bounds_and_supports_checked_seeks() {
+        let bytes: Vec<u8> = (0..2048).map(|value| (value % 251) as u8).collect();
+        let image = TestImage::new(&bytes);
+        let body = Body::try_new(image.path.clone(), "raw").unwrap();
+        let mut slice = BodySlice::new(&body, 512, 1024).unwrap();
+
+        assert_eq!(slice.start(), 512);
+        assert_eq!(slice.len(), 1024);
+        assert_eq!(slice.volume_len(), 1024);
+        assert_eq!(slice.sector_size(), 512);
+
+        let mut output = Vec::new();
+        slice.read_to_end(&mut output).unwrap();
+        assert_eq!(output, bytes[512..1536]);
+        assert_eq!(slice.position(), 1024);
+        assert_eq!(slice.read(&mut [0; 1]).unwrap(), 0);
+
+        assert_eq!(slice.seek(SeekFrom::End(-16)).unwrap(), 1008);
+        assert!(slice.seek(SeekFrom::Current(-1009)).is_err());
+        assert_eq!(slice.position(), 1008);
+        assert!(slice.seek(SeekFrom::End(1)).is_err());
+        assert_eq!(slice.position(), 1008);
+    }
+
+    #[test]
+    fn cloned_slice_keeps_an_independent_cursor() {
+        let bytes: Vec<u8> = (0..1024).map(|value| (value % 251) as u8).collect();
+        let image = TestImage::new(&bytes);
+        let body = Body::try_new(image.path.clone(), "raw").unwrap();
+        let mut original = BodySlice::new(&body, 0, 1024).unwrap();
+        original.seek(SeekFrom::Start(512)).unwrap();
+        let mut cloned = original.clone();
+
+        cloned.seek(SeekFrom::Start(0)).unwrap();
+        assert_eq!(original.position(), 512);
+        assert_eq!(cloned.position(), 0);
+
+        let mut original_byte = [0_u8; 1];
+        let mut cloned_byte = [0_u8; 1];
+        original.read_exact(&mut original_byte).unwrap();
+        cloned.read_exact(&mut cloned_byte).unwrap();
+        assert_eq!(original_byte[0], bytes[512]);
+        assert_eq!(cloned_byte[0], bytes[0]);
+        assert_eq!(original.position(), 513);
+        assert_eq!(cloned.position(), 1);
     }
 }

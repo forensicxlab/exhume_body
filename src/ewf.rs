@@ -108,6 +108,10 @@ impl Default for ChunkCache {
 pub struct EWF {
     /// File descriptors for every segment (ordered).
     segments: Vec<File>,
+    /// Canonical paths of every opened segment, in the same order as
+    /// `segments`. Used to protect multi-file evidence during derivative
+    /// exports and to bind resumable operations to every backing file.
+    segment_paths: Vec<PathBuf>,
     /// Segment header (from the *last* parsed segment).
     ewf_header: EwfHeader,
     /// All discovered section descriptors of the currently processed segment.
@@ -347,8 +351,20 @@ impl EWF {
 
         // Iterate over every segment and merge their structures.
         for file in files {
-            let fd = File::open(file).map_err(|e| e.to_string())?;
+            let canonical = file.canonicalize().map_err(|error| {
+                format!("cannot resolve EWF segment {}: {error}", file.display())
+            })?;
+            if ewf.segment_paths.contains(&canonical) {
+                return Err(format!(
+                    "EWF segment set resolves the same backing file more than once: {}",
+                    canonical.display()
+                ));
+            }
+            let fd = File::open(&canonical).map_err(|error| {
+                format!("cannot open EWF segment {}: {error}", canonical.display())
+            })?;
             ewf = ewf.parse_segment(fd)?;
+            ewf.segment_paths.push(canonical);
         }
 
         Ok(ewf)
@@ -431,6 +447,11 @@ impl EWF {
     #[inline]
     pub fn get_image_size(&self) -> u64 {
         self.volume.total_sector_count as u64 * self.volume.bytes_per_sector as u64
+    }
+
+    /// Canonical paths for all segment files used by this EWF reader.
+    pub fn backing_paths(&self) -> &[PathBuf] {
+        &self.segment_paths
     }
 
     // ---------------------------------------------------------------------
@@ -697,6 +718,7 @@ impl Clone for EWF {
 
         Self {
             segments,
+            segment_paths: self.segment_paths.clone(),
             ewf_header: self.ewf_header.clone(),
             sections: self.sections.clone(),
             header: self.header.clone(),
@@ -768,4 +790,37 @@ fn find_files(path: &Path) -> Result<Vec<PathBuf>, String> {
     paths.sort();
 
     Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn segment_discovery_and_cloning_preserve_all_backing_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("evidence.E01");
+        let second = directory.path().join("evidence.E02");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+
+        let discovered = find_files(&second).unwrap();
+        assert_eq!(
+            discovered,
+            vec![
+                first.canonicalize().unwrap(),
+                second.canonicalize().unwrap()
+            ]
+        );
+
+        let ewf = EWF {
+            segment_paths: discovered
+                .iter()
+                .map(|path| path.canonicalize().unwrap())
+                .collect(),
+            ..EWF::default()
+        };
+        assert_eq!(ewf.clone().backing_paths(), ewf.backing_paths());
+    }
 }

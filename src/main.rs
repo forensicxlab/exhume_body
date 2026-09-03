@@ -7,7 +7,6 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 
 const EXPORT_CHUNK: usize = 1024 * 1024;
 
-
 fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
     let mut reader: Body;
     match format {
@@ -74,7 +73,6 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
     let result = String::from_utf8_lossy(&bytes);
     println!("{}", result);
 }
-
 
 fn export_to_raw(input: &str, format: &str, output: &str) {
     let mut body = Body::new(input.to_string(), format);
