@@ -58,9 +58,18 @@ fn process_file(file_path: &str, format: &str, size: &u64, offset: &u64) {
             info!("Sector size: {:?}", reader.get_sector_size());
             debug!("------------------------------------------------------------");
         }
+        "vhdx" => {
+            info!("Processing the file '{}' in 'vhdx' format...", file_path);
+            reader = Body::new_from(file_path.to_string(), format, Some(*offset));
+            info!("------------------------------------------------------------");
+            info!("Selected format: VHDX");
+            info!("Description: VHDX (Hyper-V Virtual Hard Disk v2) image.");
+            info!("Sector size: {:?}", reader.get_sector_size());
+            debug!("------------------------------------------------------------");
+        }
         _ => {
             error!(
-                "Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff', 'aff4', and 'auto'.",
+                "Invalid format '{}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff', 'aff4', 'vhdx', and 'auto'.",
                 format
             );
             std::process::exit(1);
@@ -175,7 +184,7 @@ fn main() {
                 .value_parser(value_parser!(String))
                 .required(false)
                 .help(
-                    "The format of the file, either 'raw', 'ewf', 'vmdk', 'aff', 'aff4' or 'auto'.",
+                    "The format of the file, either 'raw', 'ewf', 'vmdk', 'aff', 'aff4', 'vhdx' or 'auto'.",
                 ),
         )
         .arg(
