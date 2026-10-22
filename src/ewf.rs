@@ -4,6 +4,7 @@
 //! parse, inspect and stream data from a multi-segment **EWF / EnCase** forensic
 //! image (`.E01`, `.L01`, …).
 
+use crate::utils::read_exact_at;
 use flate2::read::ZlibDecoder;
 use log::{debug, error, info};
 use std::collections::HashMap;
@@ -142,14 +143,10 @@ impl EwfVolumeSection {
         let mut bytes_per_sector = [0u8; 4];
         let mut total_sector_count = [0u8; 4];
 
-        file.seek(SeekFrom::Start(offset + 4)).unwrap();
-        file.read_exact(&mut chunk_count).unwrap();
-        file.seek(SeekFrom::Start(offset + 8)).unwrap();
-        file.read_exact(&mut sector_per_chunk).unwrap();
-        file.seek(SeekFrom::Start(offset + 12)).unwrap();
-        file.read_exact(&mut bytes_per_sector).unwrap();
-        file.seek(SeekFrom::Start(offset + 16)).unwrap();
-        file.read_exact(&mut total_sector_count).unwrap();
+        read_exact_at(&mut file, offset + 4, &mut chunk_count).unwrap();
+        read_exact_at(&mut file, offset + 8, &mut sector_per_chunk).unwrap();
+        read_exact_at(&mut file, offset + 12, &mut bytes_per_sector).unwrap();
+        read_exact_at(&mut file, offset + 16, &mut total_sector_count).unwrap();
 
         Self {
             chunk_count: u32::from_le_bytes(chunk_count),
@@ -218,14 +215,10 @@ impl EwfSectionDescriptor {
         let mut section_size = [0u8; 8];
         let mut checksum = [0u8; 4];
 
-        file.seek(SeekFrom::Start(offset)).unwrap();
-        file.read_exact(&mut section_type_def).unwrap();
-        file.seek(SeekFrom::Start(offset + 16)).unwrap();
-        file.read_exact(&mut next_section_offset).unwrap();
-        file.seek(SeekFrom::Start(offset + 24)).unwrap();
-        file.read_exact(&mut section_size).unwrap();
-        file.seek(SeekFrom::Start(offset + 72)).unwrap();
-        file.read_exact(&mut checksum).unwrap();
+        read_exact_at(&mut file, offset, &mut section_type_def).unwrap();
+        read_exact_at(&mut file, offset + 16, &mut next_section_offset).unwrap();
+        read_exact_at(&mut file, offset + 24, &mut section_size).unwrap();
+        read_exact_at(&mut file, offset + 72, &mut checksum).unwrap();
 
         let mut section_type = String::from_utf8(section_type_def.to_vec()).unwrap();
         section_type.retain(|c| c != '\0');
@@ -464,8 +457,7 @@ impl EWF {
         // Reference: §3.9.1 of the official spec.
         let mut chunks = Vec::new();
         let mut buffer = [0u8; 4];
-        file.seek(SeekFrom::Start(offset)).unwrap();
-        file.read_exact(&mut buffer).unwrap();
+        read_exact_at(&mut file, offset, &mut buffer).unwrap();
         let entry_count = u32::from_le_bytes(buffer);
 
         let mut buffer_u64 = [0u8; 8];

@@ -31,7 +31,11 @@ use std::{
     sync::Arc,
 };
 
+use crate::utils::{
+    be_u16, be_u32, be_u64, checked_offset, invalid_data, read_exact_at, read_zero_padded_at,
+};
 use flate2::read::DeflateDecoder;
+
 use log::{debug, info, warn};
 
 const QCOW2_MAGIC: [u8; 4] = [b'Q', b'F', b'I', 0xfb];
@@ -86,52 +90,6 @@ const HEADER_EXT_CRYPTO_HEADER: u32 = 0x0537_be77;
 const HEADER_EXT_DATA_FILE: u32 = 0x4441_5441;
 const FEATURE_NAME_ENTRY_SIZE: usize = 48;
 
-fn be_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_be_bytes([data[offset], data[offset + 1]])
-}
-
-fn be_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
-}
-
-fn be_u64(data: &[u8], offset: usize) -> u64 {
-    let mut raw = [0u8; 8];
-    raw.copy_from_slice(&data[offset..offset + 8]);
-    u64::from_be_bytes(raw)
-}
-
-fn invalid_data(message: String) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-/// Seek to `offset` and fill `buf` completely.
-fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(buf)
-}
-
-/// Seek to `offset` and read as many bytes as the file provides, zero-filling
-/// the remainder of `buf`. Returns the number of bytes actually read.
-fn read_zero_padded_at(file: &mut File, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-    file.seek(SeekFrom::Start(offset))?;
-    let mut filled = 0;
-    while filled < buf.len() {
-        match file.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    buf[filled..].fill(0);
-    Ok(filled)
-}
-
 /// Decoded fixed-size part of a QCOW2 header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Qcow2Header {
@@ -168,24 +126,24 @@ impl Qcow2Header {
         if data[0..4] != QCOW2_MAGIC {
             return Err("invalid QCOW2 magic".to_owned());
         }
-        let version = be_u32(data, 4);
+        let version = be_u32(data, 4)?;
         if version != 2 && version != 3 {
             return Err(format!("unsupported QCOW2 version {version}"));
         }
 
         let mut header = Qcow2Header {
             version,
-            backing_file_offset: be_u64(data, 8),
-            backing_file_size: be_u32(data, 16),
-            cluster_bits: be_u32(data, 20),
-            size: be_u64(data, 24),
-            crypt_method: be_u32(data, 32),
-            l1_size: be_u32(data, 36),
-            l1_table_offset: be_u64(data, 40),
-            refcount_table_offset: be_u64(data, 48),
-            refcount_table_clusters: be_u32(data, 56),
-            nb_snapshots: be_u32(data, 60),
-            snapshots_offset: be_u64(data, 64),
+            backing_file_offset: be_u64(data, 8)?,
+            backing_file_size: be_u32(data, 16)?,
+            cluster_bits: be_u32(data, 20)?,
+            size: be_u64(data, 24)?,
+            crypt_method: be_u32(data, 32)?,
+            l1_size: be_u32(data, 36)?,
+            l1_table_offset: be_u64(data, 40)?,
+            refcount_table_offset: be_u64(data, 48)?,
+            refcount_table_clusters: be_u32(data, 56)?,
+            nb_snapshots: be_u32(data, 60)?,
+            snapshots_offset: be_u64(data, 64)?,
             incompatible_features: 0,
             compatible_features: 0,
             autoclear_features: 0,
@@ -198,11 +156,11 @@ impl Qcow2Header {
             if data.len() < V3_MIN_HEADER_LENGTH as usize {
                 return Err("truncated QCOW2 version 3 header".to_owned());
             }
-            header.incompatible_features = be_u64(data, 72);
-            header.compatible_features = be_u64(data, 80);
-            header.autoclear_features = be_u64(data, 88);
-            header.refcount_order = be_u32(data, 96);
-            header.header_length = be_u32(data, 100);
+            header.incompatible_features = be_u64(data, 72)?;
+            header.compatible_features = be_u64(data, 80)?;
+            header.autoclear_features = be_u64(data, 88)?;
+            header.refcount_order = be_u32(data, 96)?;
+            header.header_length = be_u32(data, 100)?;
             if header.header_length < V3_MIN_HEADER_LENGTH {
                 return Err(format!(
                     "QCOW2 header length {} is smaller than the minimum of {}",
@@ -307,8 +265,13 @@ impl Qcow2HeaderExtensions {
         let mut offset = header.header_length as usize;
 
         while offset + 8 <= first_cluster.len() {
-            let ext_type = be_u32(first_cluster, offset);
-            let ext_len = be_u32(first_cluster, offset + 4) as usize;
+            let (Ok(ext_type), Ok(ext_len)) = (
+                be_u32(first_cluster, offset),
+                be_u32(first_cluster, offset + 4),
+            ) else {
+                break;
+            };
+            let ext_len = ext_len as usize;
             offset += 8;
             if ext_type == HEADER_EXT_END {
                 break;
@@ -405,15 +368,15 @@ fn parse_snapshots(file: &mut File, header: &Qcow2Header) -> io::Result<Vec<Qcow
     for _ in 0..count {
         let mut fixed = [0u8; FIXED_PART];
         read_exact_at(file, offset, &mut fixed)?;
-        let l1_table_offset = be_u64(&fixed, 0);
-        let l1_size = be_u32(&fixed, 8);
-        let id_str_size = be_u16(&fixed, 12) as usize;
-        let name_size = be_u16(&fixed, 14) as usize;
-        let date_sec = be_u32(&fixed, 16);
-        let date_nsec = be_u32(&fixed, 20);
+        let l1_table_offset = be_u64(&fixed, 0)?;
+        let l1_size = be_u32(&fixed, 8)?;
+        let id_str_size = be_u16(&fixed, 12)? as usize;
+        let name_size = be_u16(&fixed, 14)? as usize;
+        let date_sec = be_u32(&fixed, 16)?;
+        let date_nsec = be_u32(&fixed, 20)?;
         // Bytes 24..32 hold the guest clock (vm_clock_nsec), unused here.
-        let mut vm_state_size = be_u32(&fixed, 32) as u64;
-        let extra_data_size = be_u32(&fixed, 36) as usize;
+        let mut vm_state_size = be_u32(&fixed, 32)? as u64;
+        let extra_data_size = be_u32(&fixed, 36)? as usize;
         if extra_data_size > 1024 {
             return Err(invalid_data(format!(
                 "snapshot extra data size {extra_data_size} is unreasonably large"
@@ -425,10 +388,10 @@ fn parse_snapshots(file: &mut File, header: &Qcow2Header) -> io::Result<Vec<Qcow
         let extra = &variable[..extra_data_size];
         let mut disk_size = None;
         if extra.len() >= 8 {
-            vm_state_size = be_u64(extra, 0);
+            vm_state_size = be_u64(extra, 0)?;
         }
         if extra.len() >= 16 {
-            disk_size = Some(be_u64(extra, 8));
+            disk_size = Some(be_u64(extra, 8)?);
         }
         let id = String::from_utf8_lossy(&variable[extra_data_size..extra_data_size + id_str_size])
             .into_owned();
@@ -908,7 +871,10 @@ impl QCOW2 {
         let mut raw = vec![0u8; (l1_size * 8) as usize];
         read_exact_at(file, header.l1_table_offset, &mut raw)
             .map_err(|error| format!("cannot read QCOW2 L1 table: {error}"))?;
-        let l1: Vec<u64> = raw.chunks_exact(8).map(|c| be_u64(c, 0)).collect();
+        let l1: Vec<u64> = raw
+            .chunks_exact(8)
+            .map(|c| be_u64(c, 0))
+            .collect::<Result<_, _>>()?;
         for (index, entry) in l1.iter().enumerate() {
             let offset = entry & OFFSET_MASK;
             if !offset.is_multiple_of(cluster_size) {
@@ -940,7 +906,11 @@ impl QCOW2 {
                 raw.len()
             );
         }
-        let table: Arc<Vec<u64>> = Arc::new(raw.chunks_exact(8).map(|c| be_u64(c, 0)).collect());
+        let table: Arc<Vec<u64>> = Arc::new(
+            raw.chunks_exact(8)
+                .map(|c| be_u64(c, 0))
+                .collect::<Result<_, _>>()?,
+        );
         if self.l2_cache.len() >= L2_CACHE_TABLES {
             self.l2_cache.clear();
         }
@@ -1324,8 +1294,8 @@ impl Seek for QCOW2 {
         let size = self.header.size;
         let target = match pos {
             SeekFrom::Start(offset) => Some(offset),
-            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
-            SeekFrom::End(offset) => size.checked_add_signed(offset),
+            SeekFrom::Current(offset) => checked_offset(self.position, offset).ok(),
+            SeekFrom::End(offset) => checked_offset(size, offset).ok(),
         };
         match target {
             Some(target) if target <= size => {

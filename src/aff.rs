@@ -26,6 +26,7 @@
 //! zero pages.  Metadata segments such as `pagesize`, `imagesize`, and
 //! `sectorsize` carry acquisition parameters.
 
+use crate::utils::{be_u32, checked_offset};
 use flate2::read::ZlibDecoder;
 use log::info;
 use lzma_rs::decompress::raw::{LzmaDecoder, LzmaParams, LzmaProperties};
@@ -82,7 +83,7 @@ const LZMA_HEADER_SIZE: usize = 13;
 fn read_be_u32(file: &mut File) -> io::Result<u32> {
     let mut buf = [0u8; 4];
     file.read_exact(&mut buf)?;
-    Ok(u32::from_be_bytes(buf))
+    Ok(be_u32(&buf, 0)?)
 }
 
 // ---- Helper: decode an `aff_quad` (64-bit value stored as two BE u32) -------
@@ -96,8 +97,8 @@ fn decode_aff_quad(data: &[u8]) -> io::Result<u64> {
             format!("aff_quad requires exactly 8 bytes, got {}", data.len()),
         ));
     }
-    let low = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as u64;
-    let high = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as u64;
+    let low = be_u32(data, 0)? as u64;
+    let high = be_u32(data, 4)? as u64;
     Ok((high << 32) | low)
 }
 
@@ -109,9 +110,7 @@ fn metadata_u32(name: &str, argument: u32, data: Option<&[u8]>) -> Result<u32, S
                 .parse::<u32>()
                 .map_err(|_| format!("AFF {name} ASCII value is outside the u32 range"))?,
         ),
-        Some(bytes) if bytes.len() == 4 => {
-            Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        }
+        Some(bytes) if bytes.len() == 4 => Some(be_u32(bytes, 0)?),
         Some(bytes) => {
             return Err(format!(
                 "AFF {name} payload is {} bytes, expected a 4-byte integer or bounded ASCII decimal",
@@ -807,36 +806,27 @@ impl Seek for AFF {
         let next = match pos {
             SeekFrom::Start(offset) => offset,
             SeekFrom::Current(delta) => {
-                if delta >= 0 {
-                    self.position.checked_add(delta as u64).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "Seek overflow")
-                    })?
-                } else {
-                    self.position
-                        .checked_sub(delta.unsigned_abs())
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::InvalidInput, "Cannot seek before start")
-                        })?
-                }
+                checked_offset(self.position, delta).map_err(|_| aff_seek_error(delta))?
             }
             SeekFrom::End(delta) => {
-                if delta >= 0 {
-                    self.image_size.checked_add(delta as u64).ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "Seek overflow")
-                    })?
-                } else {
-                    self.image_size
-                        .checked_sub(delta.unsigned_abs())
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::InvalidInput, "Cannot seek before start")
-                        })?
-                }
+                checked_offset(self.image_size, delta).map_err(|_| aff_seek_error(delta))?
             }
         };
 
         self.position = next;
         Ok(self.position)
     }
+}
+
+fn aff_seek_error(delta: i64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        if delta >= 0 {
+            "Seek overflow"
+        } else {
+            "Cannot seek before start"
+        },
+    )
 }
 
 #[cfg(test)]

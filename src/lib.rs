@@ -3,6 +3,7 @@ pub mod aff4;
 pub mod ewf;
 pub mod qcow2;
 pub mod raw;
+mod utils;
 pub mod vhdx;
 pub mod vmdk;
 
@@ -12,6 +13,7 @@ use ewf::EWF;
 use log::{error, info};
 use qcow2::QCOW2;
 use raw::RAW;
+use utils::checked_offset;
 use vhdx::VHDX;
 use vmdk::VMDK;
 
@@ -568,20 +570,6 @@ impl Seek for BodySlice {
         self.pos = new_pos;
         Ok(self.pos)
     }
-}
-
-fn checked_offset(base: u64, offset: i64) -> io::Result<u64> {
-    let target = if offset >= 0 {
-        base.checked_add(offset as u64)
-    } else {
-        base.checked_sub(offset.unsigned_abs())
-    };
-    target.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "seek position is before start or overflows u64",
-        )
-    })
 }
 
 impl VolumeReader for BodySlice {

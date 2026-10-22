@@ -7,6 +7,7 @@
 //!
 //! For the moment VMDK descriptor files not written in UTF-8 encoding are not supported.
 
+use crate::utils::{checked_offset, le_i64, le_u16, le_u32, le_u64};
 use std::{
     cmp::min,
     collections::HashMap,
@@ -787,7 +788,7 @@ fn read_sparse_extent(
                 // 12-byte marker: 8-byte virtual-LBA + 4-byte compressed-size
                 let mut hdr = [0u8; 12];
                 file.read_exact(&mut hdr)?;
-                let comp_len = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
+                let comp_len = le_u32(&hdr, 8)? as usize;
 
                 // 2. Read the compressed payload
                 let mut comp = vec![0u8; comp_len];
@@ -962,35 +963,22 @@ impl VMDKSparseFileHeader {
         if &header_data[0..4] != b"KDMV" {
             return Err("Invalid VMDK magic number".to_string());
         }
-        let compression_method =
-            match u16::from_le_bytes(<[u8; 2]>::try_from(&header_data[77..79]).unwrap()) {
-                0 => VMDKCompressionMethod::None,
-                1 => VMDKCompressionMethod::Deflate,
-                _ => return Err("Unsupported compression method".to_string()),
-            };
+        let compression_method = match le_u16(header_data, 77)? {
+            0 => VMDKCompressionMethod::None,
+            1 => VMDKCompressionMethod::Deflate,
+            _ => return Err("Unsupported compression method".to_string()),
+        };
         Ok(Self {
-            version: u32::from_le_bytes(<[u8; 4]>::try_from(&header_data[4..8]).unwrap()),
-            flags: u32::from_le_bytes(<[u8; 4]>::try_from(&header_data[8..12]).unwrap()),
-            capacity: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[12..20]).unwrap()),
-            grain_number: u64::from_le_bytes(<[u8; 8]>::try_from(&header_data[20..28]).unwrap()),
-            embedded_descriptor_sector: u64::from_le_bytes(
-                <[u8; 8]>::try_from(&header_data[28..36]).unwrap(),
-            ),
-            embedded_descriptor_sectors_count: u64::from_le_bytes(
-                <[u8; 8]>::try_from(&header_data[36..44]).unwrap(),
-            ),
-            number_of_grain_table_entries: u32::from_le_bytes(
-                <[u8; 4]>::try_from(&header_data[44..48]).unwrap(),
-            ),
-            secondary_grain_directory_sector: u64::from_le_bytes(
-                <[u8; 8]>::try_from(&header_data[48..56]).unwrap(),
-            ),
-            grain_directory_sector: i64::from_le_bytes(
-                <[u8; 8]>::try_from(&header_data[56..64]).unwrap(),
-            ),
-            number_of_sectors: u64::from_le_bytes(
-                <[u8; 8]>::try_from(&header_data[64..72]).unwrap(),
-            ),
+            version: le_u32(header_data, 4)?,
+            flags: le_u32(header_data, 8)?,
+            capacity: le_u64(header_data, 12)?,
+            grain_number: le_u64(header_data, 20)?,
+            embedded_descriptor_sector: le_u64(header_data, 28)?,
+            embedded_descriptor_sectors_count: le_u64(header_data, 36)?,
+            number_of_grain_table_entries: le_u32(header_data, 44)?,
+            secondary_grain_directory_sector: le_u64(header_data, 48)?,
+            grain_directory_sector: le_i64(header_data, 56)?,
+            number_of_sectors: le_u64(header_data, 64)?,
             is_dirty: header_data[72] & 0x01 == 1,
             compression_method,
         })
@@ -1389,7 +1377,7 @@ impl VMDK {
                     }
                 }
                 SeekFrom::Current(offset) => {
-                    let new_position = self.position.checked_add_signed(offset);
+                    let new_position = checked_offset(self.position, offset).ok();
                     if new_position.is_some() && new_position.unwrap_or(u64::MAX) <= total_bytes {
                         self.position = new_position.unwrap_or(0);
                         Ok(self.position)
@@ -1401,7 +1389,7 @@ impl VMDK {
                     }
                 }
                 SeekFrom::End(offset) => {
-                    let new_position = total_bytes.checked_add_signed(offset);
+                    let new_position = checked_offset(total_bytes, offset).ok();
                     if new_position.is_some() && new_position.unwrap_or(u64::MAX) <= total_bytes {
                         self.position = new_position.unwrap_or(0);
                         Ok(self.position)

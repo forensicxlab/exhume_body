@@ -17,8 +17,7 @@ use std::{
 /// to reposition the cursor.
 ///
 /// Cloning a [`RAW`] duplicates the underlying file handle using
-/// [`File::try_clone`], so both instances share the same file but maintain
-/// independent cursors.
+/// [`File::try_clone`], so both instances share the same underlying file cursor.
 pub struct RAW {
     /// The underlying file handle.
     pub file: File,
@@ -72,8 +71,8 @@ impl RAW {
 impl Clone for RAW {
     /// Clones the [`RAW`] instance by duplicating the underlying file handle.
     ///
-    /// Cloning is cheap (just a file-descriptor duplication) but note that
-    /// the new handle has a *separate* seek position.
+    /// Cloning is cheap (just a file-descriptor duplication), but seeking or
+    /// reading either handle also changes the other's seek position.
     ///
     /// # Panics
     ///

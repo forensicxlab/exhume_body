@@ -1,3 +1,4 @@
+use crate::utils::{le_u16, le_u32, le_u64, read_exact_at};
 use flate2::read::DeflateDecoder;
 use log::{debug, info, warn};
 use rio_api::model::{Literal, Term};
@@ -32,6 +33,12 @@ pub enum Aff4Error {
 impl From<io::Error> for Aff4Error {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+impl From<crate::utils::DecodeError> for Aff4Error {
+    fn from(error: crate::utils::DecodeError) -> Self {
+        Self::Io(error.into())
     }
 }
 
@@ -187,10 +194,8 @@ impl ZipReader {
 
     /// Computes the payload start (after local header + filename + extra).
     fn payload_offset(&mut self, header_offset: u64) -> Aff4Result<u64> {
-        self.file.seek(SeekFrom::Start(header_offset))?;
-
         let mut fixed = [0u8; 30];
-        self.file.read_exact(&mut fixed)?;
+        read_exact_at(&mut self.file, header_offset, &mut fixed)?;
 
         if fixed[0..4] != LOCAL_FILE_SIG {
             return Err(Aff4Error::Format(format!(
@@ -199,8 +204,8 @@ impl ZipReader {
             )));
         }
 
-        let name_len = u16::from_le_bytes([fixed[26], fixed[27]]) as u64;
-        let extra_len = u16::from_le_bytes([fixed[28], fixed[29]]) as u64;
+        let name_len = le_u16(&fixed, 26)? as u64;
+        let extra_len = le_u16(&fixed, 28)? as u64;
 
         Ok(header_offset + 30 + name_len + extra_len)
     }
@@ -210,9 +215,8 @@ impl ZipReader {
         let e = self.entry(name)?.clone();
         let payload = self.payload_offset(e.header_offset)?;
 
-        self.file.seek(SeekFrom::Start(payload))?;
         let mut buf = vec![0u8; e.compressed_size as usize];
-        self.file.read_exact(&mut buf)?;
+        read_exact_at(&mut self.file, payload, &mut buf)?;
         Ok(buf)
     }
 
@@ -387,7 +391,7 @@ impl AFF4 {
             )));
         }
 
-        let eocd64_offset = u64::from_le_bytes(locator_buf[8..16].try_into().unwrap());
+        let eocd64_offset = le_u64(&locator_buf, 8)?;
         info!("Zip64 EOCD Record located at: 0x{:x}", eocd64_offset);
 
         file.seek(SeekFrom::Start(eocd64_offset))?;
@@ -397,9 +401,9 @@ impl AFF4 {
             return Err(Aff4Error::Format("invalid zip64 eocd signature".into()));
         }
 
-        let total_entries = u64::from_le_bytes(eocd64_buf[32..40].try_into().unwrap());
-        let _cd_size = u64::from_le_bytes(eocd64_buf[40..48].try_into().unwrap());
-        let cd_start_offset = u64::from_le_bytes(eocd64_buf[48..56].try_into().unwrap());
+        let total_entries = le_u64(&eocd64_buf, 32)?;
+        let _cd_size = le_u64(&eocd64_buf, 40)?;
+        let cd_start_offset = le_u64(&eocd64_buf, 48)?;
 
         info!("Central Directory Total Entries: 0x{:x}", total_entries);
         info!("Central Directory Size: 0x{:x}", _cd_size);
@@ -428,10 +432,10 @@ impl AFF4 {
                 break;
             }
 
-            let comp_method = u16::from_le_bytes(buf[10..12].try_into().unwrap());
-            let name_len = u16::from_le_bytes(buf[28..30].try_into().unwrap()) as usize;
-            let extra_len = u16::from_le_bytes(buf[30..32].try_into().unwrap()) as usize;
-            let comment_len = u16::from_le_bytes(buf[32..34].try_into().unwrap()) as usize;
+            let comp_method = le_u16(&buf, 10)?;
+            let name_len = le_u16(&buf, 28)? as usize;
+            let extra_len = le_u16(&buf, 30)? as usize;
+            let comment_len = le_u16(&buf, 32)? as usize;
 
             let mut name_buf = vec![0u8; name_len];
             file.read_exact(&mut name_buf)?;
@@ -445,15 +449,15 @@ impl AFF4 {
             }
 
             // default 32-bit fields
-            let mut real_comp_size = u32::from_le_bytes(buf[20..24].try_into().unwrap()) as u64;
-            let mut real_uncomp_size = u32::from_le_bytes(buf[24..28].try_into().unwrap()) as u64;
-            let mut real_offset = u32::from_le_bytes(buf[42..46].try_into().unwrap()) as u64;
+            let mut real_comp_size = le_u32(&buf, 20)? as u64;
+            let mut real_uncomp_size = le_u32(&buf, 24)? as u64;
+            let mut real_offset = le_u32(&buf, 42)? as u64;
 
             // Zip64 extra field (tag 0x0001)
             let mut i = 0;
             while i + 4 <= extra_buf.len() {
-                let tag = u16::from_le_bytes(extra_buf[i..i + 2].try_into().unwrap());
-                let size = u16::from_le_bytes(extra_buf[i + 2..i + 4].try_into().unwrap()) as usize;
+                let tag = le_u16(&extra_buf, i)?;
+                let size = le_u16(&extra_buf, i + 2)? as usize;
                 let data_start = i + 4;
                 let data_end = data_start.saturating_add(size);
 
@@ -466,17 +470,15 @@ impl AFF4 {
                     let mut p = data_start;
 
                     if real_uncomp_size == 0xFFFF_FFFF && p + 8 <= data_end {
-                        real_uncomp_size =
-                            u64::from_le_bytes(extra_buf[p..p + 8].try_into().unwrap());
+                        real_uncomp_size = le_u64(&extra_buf, p)?;
                         p += 8;
                     }
                     if real_comp_size == 0xFFFF_FFFF && p + 8 <= data_end {
-                        real_comp_size =
-                            u64::from_le_bytes(extra_buf[p..p + 8].try_into().unwrap());
+                        real_comp_size = le_u64(&extra_buf, p)?;
                         p += 8;
                     }
                     if real_offset == 0xFFFF_FFFF && p + 8 <= data_end {
-                        real_offset = u64::from_le_bytes(extra_buf[p..p + 8].try_into().unwrap());
+                        real_offset = le_u64(&extra_buf, p)?;
                     }
                 }
 
@@ -738,10 +740,10 @@ impl AFF4 {
 
         let mut records: Vec<(u64, u64, u64, u32)> = Vec::with_capacity(map_bytes.len() / REC_SIZE);
         for (i, chunk) in map_bytes.chunks_exact(REC_SIZE).enumerate() {
-            let v_off = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-            let extent_len = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-            let target_off = u64::from_le_bytes(chunk[16..24].try_into().unwrap());
-            let index = u32::from_le_bytes(chunk[24..28].try_into().unwrap());
+            let v_off = le_u64(chunk, 0)?;
+            let extent_len = le_u64(chunk, 8)?;
+            let target_off = le_u64(chunk, 16)?;
+            let index = le_u32(chunk, 24)?;
 
             if extent_len == 0 {
                 continue; // sentinel/hole marker
@@ -1039,9 +1041,9 @@ impl AFF4 {
         zip.read_store_range(index_member, off, &mut raw)
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        let lo = u32::from_le_bytes(raw[0..4].try_into().unwrap());
-        let hi = u32::from_le_bytes(raw[4..8].try_into().unwrap());
-        let len = u32::from_le_bytes(raw[8..12].try_into().unwrap());
+        let lo = le_u32(&raw, 0)?;
+        let hi = le_u32(&raw, 4)?;
+        let len = le_u32(&raw, 8)?;
 
         Ok(IndexEntry {
             c_off: (lo as u64) | ((hi as u64) << 32),
@@ -1163,5 +1165,93 @@ impl Clone for AFF4 {
             cache: self.cache.clone(),
             position: self.position,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod as ZipCompression, ZipWriter};
+
+    #[test]
+    fn reads_zip64_map_and_chunk_indexes_across_sparse_ranges() {
+        let payload: Vec<u8> = (0..1200).map(|n| (n % 251) as u8).collect();
+        let metadata = br#"<urn:test> <http://aff4.org/Schema#size> "1536";
+            <http://aff4.org/Schema#chunkSize> "512";
+            <http://aff4.org/Schema#chunksInSegment> "3" ."#;
+        let mut map = Vec::new();
+        for value in [128u64, payload.len() as u64, 0] {
+            map.extend_from_slice(&value.to_le_bytes());
+        }
+        map.extend_from_slice(&0u32.to_le_bytes());
+        let mut index = Vec::new();
+        for (number, chunk) in payload.chunks(512).enumerate() {
+            index.extend_from_slice(&(number as u64 * 512).to_le_bytes());
+            index.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+        }
+
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes, compression) in [
+            (
+                "information.turtle",
+                metadata.as_slice(),
+                ZipCompression::Deflated,
+            ),
+            ("data/map", map.as_slice(), ZipCompression::Deflated),
+            ("data/idx", b"data\0".as_slice(), ZipCompression::Stored),
+            ("data/00000000", payload.as_slice(), ZipCompression::Stored),
+            (
+                "data/00000000.index",
+                index.as_slice(),
+                ZipCompression::Stored,
+            ),
+        ] {
+            zip.start_file(
+                name,
+                SimpleFileOptions::default()
+                    .large_file(true)
+                    .compression_method(compression),
+            )
+            .unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        let mut archive = zip.finish().unwrap().into_inner();
+        // Small archives need an explicit ZIP64 footer to exercise the AFF4
+        // reader's ZIP64 path; the writer already emitted ZIP64 local headers.
+        let end = archive.len() - 22;
+        let count = u16::from_le_bytes(archive[end + 10..end + 12].try_into().unwrap()) as u64;
+        let cd_size = u32::from_le_bytes(archive[end + 12..end + 16].try_into().unwrap()) as u64;
+        let cd_offset = u32::from_le_bytes(archive[end + 16..end + 20].try_into().unwrap()) as u64;
+        let mut footer = Vec::new();
+        footer.extend_from_slice(&ZIP64_EOCD_SIG);
+        footer.extend_from_slice(&44u64.to_le_bytes());
+        footer.extend_from_slice(&[45, 0, 45, 0]);
+        footer.extend_from_slice(&[0; 8]);
+        for value in [count, count, cd_size, cd_offset] {
+            footer.extend_from_slice(&value.to_le_bytes());
+        }
+        footer.extend_from_slice(&ZIP64_LOCATOR_SIG);
+        footer.extend_from_slice(&0u32.to_le_bytes());
+        footer.extend_from_slice(&(end as u64).to_le_bytes());
+        footer.extend_from_slice(&1u32.to_le_bytes());
+        archive.splice(end..end, footer);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.aff4");
+        std::fs::write(&path, archive).unwrap();
+        let mut image = AFF4::new(path.to_str().unwrap()).unwrap();
+        let mut expected = vec![0; 1536];
+        expected[128..1328].copy_from_slice(&payload);
+        let mut actual = Vec::new();
+        image.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        image.seek(SeekFrom::Start(600)).unwrap();
+        let mut cross_chunk = [0; 700];
+        image.read_exact(&mut cross_chunk).unwrap();
+        assert_eq!(&cross_chunk, &expected[600..1300]);
+        assert_eq!(image.seek(SeekFrom::End(1)).unwrap(), 1537);
+        assert_eq!(image.read(&mut cross_chunk).unwrap(), 0);
     }
 }

@@ -35,6 +35,10 @@ use std::{
     sync::Arc,
 };
 
+use crate::utils::{
+    checked_offset, invalid_data, le_u16, le_u32, le_u64, read_exact_at, read_zero_padded_at,
+};
+
 use log::{debug, info, warn};
 
 const MIB: u64 = 1 << 20;
@@ -161,25 +165,6 @@ fn crc32c_with_zeroed_field(data: &[u8], field: usize) -> u32 {
     crc32c(&copy)
 }
 
-fn le_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([data[offset], data[offset + 1]])
-}
-
-fn le_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
-}
-
-fn le_u64(data: &[u8], offset: usize) -> u64 {
-    let mut raw = [0u8; 8];
-    raw.copy_from_slice(&data[offset..offset + 8]);
-    u64::from_le_bytes(raw)
-}
-
 fn read_guid(data: &[u8], offset: usize) -> Guid {
     let mut g = [0u8; 16];
     g.copy_from_slice(&data[offset..offset + 16]);
@@ -187,37 +172,14 @@ fn read_guid(data: &[u8], offset: usize) -> Guid {
 }
 
 fn decode_utf16le(data: &[u8]) -> String {
-    let units: Vec<u16> = data.chunks_exact(2).map(|c| le_u16(c, 0)).collect();
+    let units: Vec<u16> = data
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
     let end = units.iter().position(|u| *u == 0).unwrap_or(units.len());
     char::decode_utf16(units[..end].iter().copied())
         .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()
-}
-
-fn invalid_data(message: String) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(buf)
-}
-
-/// Seek to `offset` and read as many bytes as the file provides, zero-filling
-/// the rest of `buf`. Returns the number of bytes actually read.
-fn read_zero_padded_at(file: &mut File, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-    file.seek(SeekFrom::Start(offset))?;
-    let mut filled = 0;
-    while filled < buf.len() {
-        match file.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    buf[filled..].fill(0);
-    Ok(filled)
 }
 
 /// One of the two VHDX headers.
@@ -243,7 +205,7 @@ impl VhdxHeader {
         if &data[0..4] != HEADER_SIGNATURE {
             return Err("missing 'head' signature".to_owned());
         }
-        let stored = le_u32(data, 4);
+        let stored = le_u32(data, 4)?;
         let computed = crc32c_with_zeroed_field(&data[..HEADER_SIZE], 4);
         if stored != computed {
             return Err(format!(
@@ -252,14 +214,14 @@ impl VhdxHeader {
         }
         let header = VhdxHeader {
             slot,
-            sequence_number: le_u64(data, 8),
+            sequence_number: le_u64(data, 8)?,
             file_write_guid: read_guid(data, 16),
             data_write_guid: read_guid(data, 32),
             log_guid: read_guid(data, 48),
-            log_version: le_u16(data, 64),
-            version: le_u16(data, 66),
-            log_length: le_u32(data, 68),
-            log_offset: le_u64(data, 72),
+            log_version: le_u16(data, 64)?,
+            version: le_u16(data, 66)?,
+            log_length: le_u32(data, 68)?,
+            log_offset: le_u64(data, 72)?,
         };
         if header.version != 1 {
             return Err(format!(
@@ -293,14 +255,14 @@ fn parse_region_table(data: &[u8]) -> Result<Vec<VhdxRegion>, String> {
     if &data[0..4] != REGION_TABLE_SIGNATURE {
         return Err("missing 'regi' signature".to_owned());
     }
-    let stored = le_u32(data, 4);
+    let stored = le_u32(data, 4)?;
     let computed = crc32c_with_zeroed_field(&data[..REGION_TABLE_SIZE], 4);
     if stored != computed {
         return Err(format!(
             "checksum mismatch (stored {stored:#010x}, computed {computed:#010x})"
         ));
     }
-    let count = le_u32(data, 8);
+    let count = le_u32(data, 8)?;
     if count > MAX_REGION_ENTRIES {
         return Err(format!("region table declares {count} entries"));
     }
@@ -309,9 +271,9 @@ fn parse_region_table(data: &[u8]) -> Result<Vec<VhdxRegion>, String> {
         let base = 16 + index * REGION_ENTRY_SIZE;
         let region = VhdxRegion {
             guid: read_guid(data, base),
-            file_offset: le_u64(data, base + 16),
-            length: le_u32(data, base + 24),
-            required: le_u32(data, base + 28) & REGION_FLAG_REQUIRED != 0,
+            file_offset: le_u64(data, base + 16)?,
+            length: le_u32(data, base + 24)?,
+            required: le_u32(data, base + 28)? & REGION_FLAG_REQUIRED != 0,
         };
         if region.file_offset < MIB || !region.file_offset.is_multiple_of(MIB) {
             return Err(format!(
@@ -351,18 +313,18 @@ fn parse_metadata_table(data: &[u8], region_length: u32) -> Result<Vec<VhdxMetad
     if &data[0..8] != METADATA_TABLE_SIGNATURE {
         return Err("missing 'metadata' signature".to_owned());
     }
-    let count = le_u16(data, 10);
+    let count = le_u16(data, 10)?;
     if count > MAX_METADATA_ENTRIES {
         return Err(format!("metadata table declares {count} entries"));
     }
     let mut entries = Vec::with_capacity(count as usize);
     for index in 0..count as usize {
         let base = 32 + index * METADATA_ENTRY_SIZE;
-        let flags = le_u32(data, base + 24);
+        let flags = le_u32(data, base + 24)?;
         let entry = VhdxMetadataEntry {
             item_id: read_guid(data, base),
-            offset: le_u32(data, base + 16),
-            length: le_u32(data, base + 20),
+            offset: le_u32(data, base + 16)?,
+            length: le_u32(data, base + 20)?,
             is_user: flags & METADATA_FLAG_IS_USER != 0,
             is_virtual_disk: flags & METADATA_FLAG_IS_VIRTUAL_DISK != 0,
             is_required: flags & METADATA_FLAG_IS_REQUIRED != 0,
@@ -418,17 +380,17 @@ impl VhdxParentLocator {
             return Err("parent locator is too short".to_owned());
         }
         let locator_type = read_guid(data, 0);
-        let count = le_u16(data, 18) as usize;
+        let count = le_u16(data, 18)? as usize;
         let mut entries = Vec::with_capacity(count);
         for index in 0..count {
             let base = 20 + index * 12;
             if base + 12 > data.len() {
                 return Err("parent locator entry table is truncated".to_owned());
             }
-            let key_offset = le_u32(data, base) as usize;
-            let value_offset = le_u32(data, base + 4) as usize;
-            let key_length = le_u16(data, base + 8) as usize;
-            let value_length = le_u16(data, base + 10) as usize;
+            let key_offset = le_u32(data, base)? as usize;
+            let value_offset = le_u32(data, base + 4)? as usize;
+            let key_length = le_u16(data, base + 8)? as usize;
+            let value_length = le_u16(data, base + 10)? as usize;
             let key_end = key_offset.checked_add(key_length);
             let value_end = value_offset.checked_add(value_length);
             match (key_end, value_end) {
@@ -673,9 +635,9 @@ impl VHDX {
                     if item.len() < 8 {
                         return Err(too_short("file parameters"));
                     }
-                    let flags = le_u32(&item, 4);
+                    let flags = le_u32(&item, 4)?;
                     parameters = Some(VhdxFileParameters {
-                        block_size: le_u32(&item, 0),
+                        block_size: le_u32(&item, 0)?,
                         leave_blocks_allocated: flags & FILE_PARAMETERS_LEAVE_BLOCKS_ALLOCATED != 0,
                         has_parent: flags & FILE_PARAMETERS_HAS_PARENT != 0,
                     });
@@ -684,7 +646,7 @@ impl VHDX {
                     if item.len() < 8 {
                         return Err(too_short("virtual disk size"));
                     }
-                    disk_size = Some(le_u64(&item, 0));
+                    disk_size = Some(le_u64(&item, 0)?);
                 }
                 ITEM_VIRTUAL_DISK_ID => {
                     if item.len() < 16 {
@@ -696,13 +658,13 @@ impl VHDX {
                     if item.len() < 4 {
                         return Err(too_short("logical sector size"));
                     }
-                    logical_sector_size = Some(le_u32(&item, 0));
+                    logical_sector_size = Some(le_u32(&item, 0)?);
                 }
                 ITEM_PHYSICAL_SECTOR_SIZE => {
                     if item.len() < 4 {
                         return Err(too_short("physical sector size"));
                     }
-                    physical_sector_size = Some(le_u32(&item, 0));
+                    physical_sector_size = Some(le_u32(&item, 0)?);
                 }
                 ITEM_PARENT_LOCATOR => {
                     parent_locator = Some(
@@ -778,7 +740,10 @@ impl VHDX {
                 needed_entries * 8
             ));
         }
-        let bat: Vec<u64> = raw_bat.chunks_exact(8).map(|c| le_u64(c, 0)).collect();
+        let bat: Vec<u64> = raw_bat
+            .chunks_exact(8)
+            .map(|c| le_u64(c, 0))
+            .collect::<Result<_, _>>()?;
 
         let parent = if parameters.has_parent {
             let locator = parent_locator
@@ -1276,8 +1241,8 @@ impl Seek for VHDX {
         let size = self.disk_size;
         let target = match pos {
             SeekFrom::Start(offset) => Some(offset),
-            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
-            SeekFrom::End(offset) => size.checked_add_signed(offset),
+            SeekFrom::Current(offset) => checked_offset(self.position, offset).ok(),
+            SeekFrom::End(offset) => checked_offset(size, offset).ok(),
         };
         match target {
             Some(target) if target <= size => {
