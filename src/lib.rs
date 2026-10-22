@@ -3,6 +3,7 @@ pub mod aff4;
 pub mod ewf;
 pub mod qcow2;
 pub mod raw;
+pub mod vhdx;
 pub mod vmdk;
 
 use aff::AFF;
@@ -11,6 +12,7 @@ use ewf::EWF;
 use log::{error, info};
 use qcow2::QCOW2;
 use raw::RAW;
+use vhdx::VHDX;
 use vmdk::VMDK;
 
 use std::io::{self, Read, Seek, SeekFrom};
@@ -58,6 +60,10 @@ pub enum BodyFormat {
     },
     QCOW2 {
         image: qcow2::QCOW2,
+        description: String,
+    },
+    VHDX {
+        image: vhdx::VHDX,
         description: String,
     },
     // Other compatible image formats here.
@@ -163,9 +169,20 @@ impl Body {
                     },
                 }
             }
+            "vhdx" => {
+                let evidence = VHDX::new(&file_path)
+                    .map_err(|err| format!("failed to open VHDX evidence '{file_path}': {err}"))?;
+                Body {
+                    path: file_path,
+                    format: BodyFormat::VHDX {
+                        image: evidence,
+                        description: "VHDX (Hyper-V Virtual Hard Disk v2) image".to_string(),
+                    },
+                }
+            }
             _ => {
                 return Err(format!(
-                    "invalid format '{format}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff', 'aff4', 'qcow2' or 'auto'"
+                    "invalid format '{format}'. Supported formats are 'raw', 'ewf', 'vmdk', 'aff', 'aff4', 'qcow2', 'vhdx' or 'auto'"
                 ));
             }
         };
@@ -192,6 +209,7 @@ impl Body {
             BodyFormat::AFF { image, .. } => image.print_info(),
             BodyFormat::AFF4 { image, .. } => image.print_info(),
             BodyFormat::QCOW2 { image, .. } => image.print_info(),
+            BodyFormat::VHDX { image, .. } => image.print_info(),
             BodyFormat::RAW { .. } => (),
             // All other compatible formats are handled here.
         }
@@ -204,6 +222,7 @@ impl Body {
             BodyFormat::AFF { image, .. } => image.get_sector_size(),
             BodyFormat::AFF4 { image, .. } => image.get_sector_size(),
             BodyFormat::QCOW2 { image, .. } => image.get_sector_size(),
+            BodyFormat::VHDX { image, .. } => image.get_sector_size(),
             BodyFormat::RAW { .. } => 512,
             // All other compatible formats are handled here.
         }
@@ -221,6 +240,7 @@ impl Body {
             BodyFormat::AFF { image, .. } => image.get_image_size(),
             BodyFormat::AFF4 { image, .. } => image.get_image_size(),
             BodyFormat::QCOW2 { image, .. } => image.get_image_size(),
+            BodyFormat::VHDX { image, .. } => image.get_image_size(),
         }
     }
 
@@ -233,15 +253,16 @@ impl Body {
             BodyFormat::AFF { description, .. } => description,
             BodyFormat::AFF4 { description, .. } => description,
             BodyFormat::QCOW2 { description, .. } => description,
+            BodyFormat::VHDX { description, .. } => description,
             // Handle additional formats here.
         }
     }
 
     /// Canonical paths of every file that backs this evidence stream.
     ///
-    /// Multi-segment EWF images, descriptor-based VMDKs and QCOW2 images with a
-    /// backing chain or an external data file can read files other than the
-    /// path supplied to [`Body::try_new`]. Exporters must protect every
+    /// Multi-segment EWF images, descriptor-based VMDKs, QCOW2 images with a
+    /// backing chain or an external data file and VHDX differencing disks can
+    /// read files other than the path supplied to [`Body::try_new`]. Exporters must protect every
     /// returned path from output/staging collisions and bind resumable work to
     /// metadata for the complete set.
     pub fn backing_paths(&self) -> Result<Vec<PathBuf>, String> {
@@ -249,6 +270,7 @@ impl Body {
             BodyFormat::EWF { image, .. } => image.backing_paths().to_vec(),
             BodyFormat::VMDK { image, .. } => image.backing_paths(),
             BodyFormat::QCOW2 { image, .. } => image.backing_paths(),
+            BodyFormat::VHDX { image, .. } => image.backing_paths(),
             BodyFormat::RAW { .. } | BodyFormat::AFF { .. } | BodyFormat::AFF4 { .. } => {
                 vec![PathBuf::from(&self.path).canonicalize().map_err(|error| {
                     format!(
@@ -297,6 +319,19 @@ impl Body {
             return Ok(BodyFormat::QCOW2 {
                 image: evidence,
                 description: "QCOW2 (QEMU Copy-On-Write) image".to_string(),
+            });
+        }
+
+        // Then VHDX. Its file type identifier is unambiguous, so a file that
+        // carries it but cannot be opened (parent missing, log to replay) must
+        // report that error rather than silently fall through to RAW.
+        if VHDX::probe(file_path) {
+            let evidence = VHDX::new(file_path)
+                .map_err(|err| format!("failed to open VHDX evidence '{file_path}': {err}"))?;
+            info!("Detected a VHDX disk image.");
+            return Ok(BodyFormat::VHDX {
+                image: evidence,
+                description: "VHDX (Hyper-V Virtual Hard Disk v2) image".to_string(),
             });
         }
 
@@ -397,6 +432,7 @@ impl Read for Body {
             BodyFormat::AFF { image, .. } => image.read(buf),
             BodyFormat::AFF4 { image, .. } => image.read(buf),
             BodyFormat::QCOW2 { image, .. } => image.read(buf),
+            BodyFormat::VHDX { image, .. } => image.read(buf),
             // TODO: Handle other compatible formats here.
         }
     }
@@ -411,6 +447,7 @@ impl Seek for Body {
             BodyFormat::AFF { image, .. } => image.seek(pos),
             BodyFormat::AFF4 { image, .. } => image.seek(pos),
             BodyFormat::QCOW2 { image, .. } => image.seek(pos),
+            BodyFormat::VHDX { image, .. } => image.seek(pos),
             // TODO: Handle other compatible formats here.
         }
     }
